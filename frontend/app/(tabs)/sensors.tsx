@@ -7,27 +7,31 @@ import { Card } from '../../components/Card';
 import { SensorDisplay } from '../../components/SensorDisplay';
 import { useRobotStore } from '../../store/robotStore';
 import { useFocusEffect } from 'expo-router';
-import axios from 'axios';
-
-const API_URL = process.env.EXPO_PUBLIC_BACKEND_URL + '/api';
 
 export default function SensorsScreen() {
-  const { status, sensors, fetchSensors } = useRobotStore();
-  const intervalRef = useRef<NodeJS.Timeout | null>(null);
+  const { status, robotUrl, sensors, fetchSensors, getCameraFrame } = useRobotStore();
+  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const [cameraFrame, setCameraFrame] = useState<string | null>(null);
+
+  const fetchCameraFrameData = useCallback(async () => {
+    const frame = await getCameraFrame();
+    if (frame) {
+      setCameraFrame(frame);
+    }
+  }, [getCameraFrame]);
 
   useFocusEffect(
     useCallback(() => {
-      if (status?.connected) {
+      if (status?.connected && robotUrl) {
         // Initial fetch
         fetchSensors();
-        fetchCameraFrame();
+        fetchCameraFrameData();
 
         // Set up polling for sensors
         intervalRef.current = setInterval(() => {
           fetchSensors();
-          fetchCameraFrame();
-        }, 1000);
+          fetchCameraFrameData();
+        }, 1500); // Slower polling for direct connection
       }
 
       return () => {
@@ -36,19 +40,10 @@ export default function SensorsScreen() {
           intervalRef.current = null;
         }
       };
-    }, [status?.connected])
+    }, [status?.connected, robotUrl, fetchSensors, fetchCameraFrameData])
   );
 
-  const fetchCameraFrame = async () => {
-    try {
-      const response = await axios.get(`${API_URL}/robot/camera/frame`);
-      setCameraFrame(response.data.frame);
-    } catch (error) {
-      console.log('Error fetching camera frame');
-    }
-  };
-
-  if (!status?.connected) {
+  if (!status?.connected || !robotUrl) {
     return (
       <SafeAreaView style={styles.container} edges={['bottom']}>
         <View style={styles.notConnected}>

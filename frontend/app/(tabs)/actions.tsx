@@ -8,18 +8,18 @@ import { useRobotStore } from '../../store/robotStore';
 import { useFocusEffect } from 'expo-router';
 
 export default function ActionsScreen() {
-  const { status, gestures, fetchGestures, executeGesture } = useRobotStore();
+  const { status, robotUrl, gestures, fetchGestures, executeGesture } = useRobotStore();
 
   useFocusEffect(
     useCallback(() => {
-      if (status?.connected && gestures.length === 0) {
+      if (status?.connected && robotUrl && gestures.length === 0) {
         fetchGestures();
       }
-    }, [status?.connected, gestures.length])
+    }, [status?.connected, robotUrl, gestures.length])
   );
 
   const handleGesture = async (gestureName: string) => {
-    if (!status?.connected) {
+    if (!status?.connected || !robotUrl) {
       Alert.alert('Not Connected', 'Please connect to a robot first');
       return;
     }
@@ -30,7 +30,7 @@ export default function ActionsScreen() {
     }
   };
 
-  if (!status?.connected) {
+  if (!status?.connected || !robotUrl) {
     return (
       <SafeAreaView style={styles.container} edges={['bottom']}>
         <View style={styles.notConnected}>

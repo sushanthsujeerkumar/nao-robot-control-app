@@ -10,30 +10,30 @@ import { useRobotStore } from '../../store/robotStore';
 import { useFocusEffect } from 'expo-router';
 
 export default function ControlScreen() {
-  const { status, sendMoveCommand, stopMovement, fetchStatus } = useRobotStore();
+  const { status, robotUrl, sendMoveCommand, stopMovement, fetchStatus } = useRobotStore();
 
   useFocusEffect(
     useCallback(() => {
-      if (status?.connected) {
+      if (status?.connected && robotUrl) {
         fetchStatus();
       }
-    }, [status?.connected])
+    }, [status?.connected, robotUrl])
   );
 
   const handleMove = (x: number, y: number, theta: number) => {
-    if (status?.connected) {
+    if (status?.connected && robotUrl) {
       sendMoveCommand(x, y, theta);
     }
   };
 
   const handleRelease = () => {
-    if (status?.connected) {
+    if (status?.connected && robotUrl) {
       stopMovement();
     }
   };
 
   const handleQuickMove = (direction: string) => {
-    if (!status?.connected) {
+    if (!status?.connected || !robotUrl) {
       Alert.alert('Not Connected', 'Please connect to a robot first');
       return;
     }
@@ -61,7 +61,7 @@ export default function ControlScreen() {
     }
   };
 
-  if (!status?.connected) {
+  if (!status?.connected || !robotUrl) {
     return (
       <SafeAreaView style={styles.container} edges={['bottom']}>
         <View style={styles.notConnected}>

@@ -10,6 +10,7 @@ import {
   KeyboardAvoidingView,
   Platform,
   Modal,
+  Linking,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
@@ -22,41 +23,28 @@ export default function ConnectScreen() {
   const {
     savedRobots,
     status,
-    sdkStatus,
+    robotUrl,
     isConnecting,
     connectionError,
-    fetchSavedRobots,
-    fetchSDKStatus,
-    saveRobot,
-    deleteRobot,
+    loadSavedRobots,
+    saveRobotLocally,
+    deleteRobotLocally,
     connectToRobot,
     disconnectFromRobot,
     setCurrentRobot,
-    error,
-    clearError,
     clearConnectionError,
   } = useRobotStore();
 
   const [robotName, setRobotName] = useState('');
   const [ipAddress, setIpAddress] = useState('172.18.16.35');
-  const [port, setPort] = useState('9559');
-  const [username, setUsername] = useState('nao');
-  const [password, setPassword] = useState('nao');
+  const [port, setPort] = useState('5000');
   const [showSaved, setShowSaved] = useState(false);
   const [showErrorModal, setShowErrorModal] = useState(false);
-  const [showAdvanced, setShowAdvanced] = useState(false);
+  const [showSetupModal, setShowSetupModal] = useState(false);
 
   useEffect(() => {
-    fetchSavedRobots();
-    fetchSDKStatus();
+    loadSavedRobots();
   }, []);
-
-  useEffect(() => {
-    if (error) {
-      Alert.alert('Error', error);
-      clearError();
-    }
-  }, [error]);
 
   useEffect(() => {
     if (connectionError) {
@@ -78,8 +66,8 @@ export default function ConnectScreen() {
       Alert.alert('Error', 'Please enter a valid IP address');
       return;
     }
-    const portNum = parseInt(port) || 9559;
-    const result = await connectToRobot(ipAddress, portNum, username, password);
+    const portNum = parseInt(port) || 5000;
+    const result = await connectToRobot(ipAddress, portNum);
     if (result.success) {
       Alert.alert('Success', 'Connected to NAO robot!');
     }
@@ -94,12 +82,12 @@ export default function ConnectScreen() {
       Alert.alert('Error', 'Please enter a valid IP address');
       return;
     }
-    await saveRobot(robotName, ipAddress, parseInt(port) || 9559);
+    saveRobotLocally(robotName, ipAddress, parseInt(port) || 5000);
     Alert.alert('Success', 'Robot saved!');
     setRobotName('');
   };
 
-  const handleSelectRobot = async (robot: RobotConfig) => {
+  const handleSelectRobot = (robot: RobotConfig) => {
     setIpAddress(robot.ip_address);
     setPort(robot.port.toString());
     setRobotName(robot.name);
@@ -113,7 +101,7 @@ export default function ConnectScreen() {
       `Are you sure you want to delete ${robot.name}?`,
       [
         { text: 'Cancel', style: 'cancel' },
-        { text: 'Delete', style: 'destructive', onPress: () => deleteRobot(robot.id) },
+        { text: 'Delete', style: 'destructive', onPress: () => deleteRobotLocally(robot.id) },
       ]
     );
   };
@@ -122,6 +110,8 @@ export default function ConnectScreen() {
     setShowErrorModal(false);
     clearConnectionError();
   };
+
+  const isConnected = status?.connected && robotUrl;
 
   return (
     <SafeAreaView style={styles.container} edges={['bottom']}>
@@ -136,44 +126,49 @@ export default function ConnectScreen() {
         >
           {/* Header */}
           <View style={styles.header}>
-            <View style={styles.robotIcon}>
-              <Ionicons name="hardware-chip" size={48} color={COLORS.primary} />
+            <View style={[styles.robotIcon, isConnected && styles.robotIconConnected]}>
+              <Ionicons 
+                name="hardware-chip" 
+                size={48} 
+                color={isConnected ? COLORS.success : COLORS.primary} 
+              />
             </View>
-            <Text style={styles.title}>Connect to NAO Robot</Text>
+            <Text style={styles.title}>NAO Robot Control</Text>
             <Text style={styles.subtitle}>
-              {status?.connected
+              {isConnected
                 ? `Connected to ${status.robot_name}`
-                : 'Enter the robot IP address to connect'}
+                : 'Connect directly to your NAO robot'}
             </Text>
           </View>
 
-          {/* Connection Method Info */}
-          <Card style={styles.infoCard}>
-            <View style={styles.infoContent}>
-              <Ionicons name="information-circle" size={24} color={COLORS.primary} />
-              <View style={styles.infoText}>
-                <Text style={styles.infoTitle}>SSH Connection Mode</Text>
-                <Text style={styles.infoDesc}>
-                  This app connects to your NAO robot via SSH and executes NAOqi commands directly on the robot.
-                </Text>
+          {/* Setup Instructions */}
+          <TouchableOpacity onPress={() => setShowSetupModal(true)}>
+            <Card style={styles.setupCard}>
+              <View style={styles.setupContent}>
+                <Ionicons name="help-circle" size={24} color={COLORS.primary} />
+                <View style={styles.setupText}>
+                  <Text style={styles.setupTitle}>First Time Setup Required</Text>
+                  <Text style={styles.setupDesc}>
+                    Tap here to see how to set up the NAO REST server
+                  </Text>
+                </View>
+                <Ionicons name="chevron-forward" size={20} color={COLORS.textMuted} />
               </View>
-            </View>
-          </Card>
+            </Card>
+          </TouchableOpacity>
 
           {/* Connection Status */}
-          {status?.connected && (
+          {isConnected && (
             <Card style={styles.statusCard}>
               <View style={styles.connectedInfo}>
                 <View style={styles.statusRow}>
                   <View style={styles.statusDot} />
                   <Text style={styles.connectedText}>Connected</Text>
-                  {status.connection_mode && (
-                    <View style={styles.modeBadge}>
-                      <Text style={styles.modeText}>{status.connection_mode}</Text>
-                    </View>
-                  )}
+                  <View style={styles.modeBadge}>
+                    <Text style={styles.modeText}>Direct</Text>
+                  </View>
                 </View>
-                <Text style={styles.ipText}>{status.ip_address}:9559</Text>
+                <Text style={styles.ipText}>{robotUrl}</Text>
                 <View style={styles.statsRow}>
                   <View style={styles.statItem}>
                     <Text style={styles.statValue}>{status.battery_level}%</Text>
@@ -184,8 +179,8 @@ export default function ConnectScreen() {
                     <Text style={styles.statLabel}>Posture</Text>
                   </View>
                   <View style={styles.statItem}>
-                    <Text style={styles.statValue}>{Math.floor(status.uptime / 60)}m</Text>
-                    <Text style={styles.statLabel}>Uptime</Text>
+                    <Text style={styles.statValue}>{status.temperature?.toFixed(0) || '-'}°</Text>
+                    <Text style={styles.statLabel}>Temp</Text>
                   </View>
                 </View>
                 <Button
@@ -200,8 +195,8 @@ export default function ConnectScreen() {
           )}
 
           {/* Connection Form */}
-          {!status?.connected && (
-            <Card title="Robot Connection">
+          {!isConnected && (
+            <Card title="Connect to NAO">
               <View style={styles.inputGroup}>
                 <Text style={styles.label}>Robot Name (optional)</Text>
                 <TextInput
@@ -214,7 +209,7 @@ export default function ConnectScreen() {
               </View>
 
               <View style={styles.inputGroup}>
-                <Text style={styles.label}>IP Address *</Text>
+                <Text style={styles.label}>NAO IP Address *</Text>
                 <TextInput
                   style={styles.input}
                   value={ipAddress}
@@ -225,65 +220,24 @@ export default function ConnectScreen() {
                   autoCapitalize="none"
                 />
                 <Text style={styles.hint}>
-                  Press NAO's chest button to hear the IP address
+                  Press NAO's chest button to hear the IP
                 </Text>
               </View>
 
               <View style={styles.inputGroup}>
-                <Text style={styles.label}>Port</Text>
+                <Text style={styles.label}>REST Server Port</Text>
                 <TextInput
                   style={styles.input}
                   value={port}
                   onChangeText={setPort}
-                  placeholder="9559"
+                  placeholder="5000"
                   placeholderTextColor={COLORS.textMuted}
                   keyboardType="numeric"
                 />
+                <Text style={styles.hint}>
+                  Default: 5000 (set by nao_rest_server.py)
+                </Text>
               </View>
-
-              {/* Advanced Settings Toggle */}
-              <TouchableOpacity 
-                style={styles.advancedToggle}
-                onPress={() => setShowAdvanced(!showAdvanced)}
-              >
-                <Text style={styles.advancedToggleText}>SSH Credentials</Text>
-                <Ionicons 
-                  name={showAdvanced ? 'chevron-up' : 'chevron-down'} 
-                  size={20} 
-                  color={COLORS.textSecondary} 
-                />
-              </TouchableOpacity>
-
-              {showAdvanced && (
-                <>
-                  <View style={styles.inputGroup}>
-                    <Text style={styles.label}>SSH Username</Text>
-                    <TextInput
-                      style={styles.input}
-                      value={username}
-                      onChangeText={setUsername}
-                      placeholder="nao"
-                      placeholderTextColor={COLORS.textMuted}
-                      autoCapitalize="none"
-                    />
-                  </View>
-
-                  <View style={styles.inputGroup}>
-                    <Text style={styles.label}>SSH Password</Text>
-                    <TextInput
-                      style={styles.input}
-                      value={password}
-                      onChangeText={setPassword}
-                      placeholder="nao"
-                      placeholderTextColor={COLORS.textMuted}
-                      secureTextEntry
-                    />
-                    <Text style={styles.hint}>
-                      Default credentials: nao / nao
-                    </Text>
-                  </View>
-                </>
-              )}
 
               <View style={styles.buttonRow}>
                 <Button
@@ -304,7 +258,7 @@ export default function ConnectScreen() {
           )}
 
           {/* Saved Robots */}
-          {savedRobots.length > 0 && (
+          {savedRobots.length > 0 && !isConnected && (
             <Card style={styles.savedCard}>
               <TouchableOpacity
                 style={styles.savedHeader}
@@ -352,30 +306,24 @@ export default function ConnectScreen() {
             </Card>
           )}
 
-          {/* How to Find IP */}
-          <Card title="Troubleshooting" style={styles.helpCard}>
+          {/* Requirements */}
+          <Card title="Requirements" style={styles.helpCard}>
             <View style={styles.helpStep}>
-              <Text style={styles.helpNumber}>1</Text>
+              <Ionicons name="checkmark-circle" size={20} color={COLORS.success} />
               <Text style={styles.helpText}>
-                Make sure NAO is powered on and connected to WiFi
+                Phone connected to same WiFi as NAO robot
               </Text>
             </View>
             <View style={styles.helpStep}>
-              <Text style={styles.helpNumber}>2</Text>
+              <Ionicons name="checkmark-circle" size={20} color={COLORS.success} />
               <Text style={styles.helpText}>
-                Press the chest button once - NAO will say its IP address
+                NAO REST server running on the robot
               </Text>
             </View>
             <View style={styles.helpStep}>
-              <Text style={styles.helpNumber}>3</Text>
+              <Ionicons name="checkmark-circle" size={20} color={COLORS.success} />
               <Text style={styles.helpText}>
-                Ensure this server can reach the robot's IP (same network or VPN)
-              </Text>
-            </View>
-            <View style={styles.helpStep}>
-              <Text style={styles.helpNumber}>4</Text>
-              <Text style={styles.helpText}>
-                SSH must be enabled on NAO (port 22) - this is on by default
+                Correct IP address (press chest button)
               </Text>
             </View>
           </Card>
@@ -400,6 +348,64 @@ export default function ConnectScreen() {
               title="OK"
               onPress={handleCloseErrorModal}
               style={{ marginTop: SPACING.lg }}
+            />
+          </View>
+        </View>
+      </Modal>
+
+      {/* Setup Instructions Modal */}
+      <Modal
+        visible={showSetupModal}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setShowSetupModal(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={[styles.modalContent, styles.setupModalContent]}>
+            <View style={styles.modalHeader}>
+              <Ionicons name="rocket" size={48} color={COLORS.primary} />
+              <Text style={styles.modalTitle}>Setup NAO REST Server</Text>
+            </View>
+            
+            <ScrollView style={styles.setupSteps}>
+              <Text style={styles.setupStepTitle}>Step 1: Get the server script</Text>
+              <Text style={styles.setupStepText}>
+                Download nao_rest_server.py from this app's repository or copy it from your computer.
+              </Text>
+              
+              <Text style={styles.setupStepTitle}>Step 2: Copy to NAO</Text>
+              <Text style={styles.setupStepCode}>
+                scp nao_rest_server.py nao@{ipAddress || '<NAO_IP>'}:~/
+              </Text>
+              <Text style={styles.setupStepNote}>Password: nao</Text>
+              
+              <Text style={styles.setupStepTitle}>Step 3: SSH to NAO</Text>
+              <Text style={styles.setupStepCode}>
+                ssh nao@{ipAddress || '<NAO_IP>'}
+              </Text>
+              
+              <Text style={styles.setupStepTitle}>Step 4: Run the server</Text>
+              <Text style={styles.setupStepCode}>
+                python nao_rest_server.py
+              </Text>
+              
+              <Text style={styles.setupStepTitle}>Step 5: Connect from app</Text>
+              <Text style={styles.setupStepText}>
+                NAO will say "Server ready". Enter the IP in this app and tap Connect!
+              </Text>
+              
+              <View style={styles.setupNote}>
+                <Ionicons name="information-circle" size={20} color={COLORS.primary} />
+                <Text style={styles.setupNoteText}>
+                  The server runs on port 5000 by default. Keep the SSH session open while using the app.
+                </Text>
+              </View>
+            </ScrollView>
+            
+            <Button
+              title="Got it!"
+              onPress={() => setShowSetupModal(false)}
+              style={{ marginTop: SPACING.md }}
             />
           </View>
         </View>
@@ -437,6 +443,10 @@ const styles = StyleSheet.create({
     borderColor: COLORS.primary,
     ...SHADOWS.glow,
   },
+  robotIconConnected: {
+    borderColor: COLORS.success,
+    shadowColor: COLORS.success,
+  },
   title: {
     fontSize: FONT_SIZES.xxl,
     fontWeight: '700',
@@ -448,28 +458,28 @@ const styles = StyleSheet.create({
     color: COLORS.textSecondary,
     textAlign: 'center',
   },
-  infoCard: {
+  setupCard: {
     marginBottom: SPACING.md,
     borderColor: COLORS.primary,
-    backgroundColor: 'rgba(0, 168, 255, 0.1)',
+    backgroundColor: 'rgba(0, 168, 255, 0.05)',
   },
-  infoContent: {
+  setupContent: {
     flexDirection: 'row',
+    alignItems: 'center',
     gap: SPACING.md,
   },
-  infoText: {
+  setupText: {
     flex: 1,
   },
-  infoTitle: {
+  setupTitle: {
     color: COLORS.primary,
     fontSize: FONT_SIZES.md,
     fontWeight: '600',
-    marginBottom: SPACING.xs,
   },
-  infoDesc: {
+  setupDesc: {
     color: COLORS.textSecondary,
     fontSize: FONT_SIZES.sm,
-    lineHeight: 20,
+    marginTop: 2,
   },
   statusCard: {
     marginBottom: SPACING.md,
@@ -496,7 +506,7 @@ const styles = StyleSheet.create({
     fontWeight: '600',
   },
   modeBadge: {
-    backgroundColor: COLORS.primary,
+    backgroundColor: COLORS.success,
     paddingHorizontal: SPACING.sm,
     paddingVertical: 2,
     borderRadius: BORDER_RADIUS.sm,
@@ -553,20 +563,6 @@ const styles = StyleSheet.create({
     fontSize: FONT_SIZES.xs,
     marginTop: SPACING.xs,
     fontStyle: 'italic',
-  },
-  advancedToggle: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingVertical: SPACING.sm,
-    marginBottom: SPACING.md,
-    borderTopWidth: 1,
-    borderTopColor: COLORS.border,
-    marginTop: SPACING.sm,
-  },
-  advancedToggleText: {
-    color: COLORS.textSecondary,
-    fontSize: FONT_SIZES.sm,
   },
   buttonRow: {
     flexDirection: 'row',
@@ -634,20 +630,9 @@ const styles = StyleSheet.create({
   },
   helpStep: {
     flexDirection: 'row',
-    alignItems: 'flex-start',
+    alignItems: 'center',
     gap: SPACING.md,
     marginBottom: SPACING.md,
-  },
-  helpNumber: {
-    width: 24,
-    height: 24,
-    borderRadius: 12,
-    backgroundColor: COLORS.primary,
-    color: '#000',
-    fontSize: FONT_SIZES.sm,
-    fontWeight: '700',
-    textAlign: 'center',
-    lineHeight: 24,
   },
   helpText: {
     flex: 1,
@@ -671,6 +656,9 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: COLORS.border,
   },
+  setupModalContent: {
+    maxHeight: '80%',
+  },
   modalHeader: {
     alignItems: 'center',
     marginBottom: SPACING.md,
@@ -680,11 +668,56 @@ const styles = StyleSheet.create({
     fontSize: FONT_SIZES.xl,
     fontWeight: '700',
     marginTop: SPACING.sm,
+    textAlign: 'center',
   },
   modalMessage: {
     color: COLORS.textSecondary,
     fontSize: FONT_SIZES.md,
     lineHeight: 22,
     textAlign: 'center',
+  },
+  setupSteps: {
+    maxHeight: 400,
+  },
+  setupStepTitle: {
+    color: COLORS.text,
+    fontSize: FONT_SIZES.md,
+    fontWeight: '600',
+    marginTop: SPACING.md,
+    marginBottom: SPACING.xs,
+  },
+  setupStepText: {
+    color: COLORS.textSecondary,
+    fontSize: FONT_SIZES.sm,
+    lineHeight: 20,
+  },
+  setupStepCode: {
+    backgroundColor: COLORS.surfaceLight,
+    color: COLORS.primary,
+    fontSize: FONT_SIZES.sm,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    padding: SPACING.sm,
+    borderRadius: BORDER_RADIUS.sm,
+    marginTop: SPACING.xs,
+  },
+  setupStepNote: {
+    color: COLORS.textMuted,
+    fontSize: FONT_SIZES.xs,
+    marginTop: SPACING.xs,
+    fontStyle: 'italic',
+  },
+  setupNote: {
+    flexDirection: 'row',
+    gap: SPACING.sm,
+    backgroundColor: 'rgba(0, 168, 255, 0.1)',
+    padding: SPACING.md,
+    borderRadius: BORDER_RADIUS.md,
+    marginTop: SPACING.lg,
+  },
+  setupNoteText: {
+    flex: 1,
+    color: COLORS.textSecondary,
+    fontSize: FONT_SIZES.sm,
+    lineHeight: 20,
   },
 });

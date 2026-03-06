@@ -26,13 +26,13 @@ const QUICK_PHRASES = [
 ];
 
 export default function SpeechScreen() {
-  const { status, speak } = useRobotStore();
+  const { status, robotUrl, speak } = useRobotStore();
   const [text, setText] = useState('');
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [history, setHistory] = useState<string[]>([]);
 
   const handleSpeak = async (speechText: string) => {
-    if (!status?.connected) {
+    if (!status?.connected || !robotUrl) {
       Alert.alert('Not Connected', 'Please connect to a robot first');
       return;
     }
@@ -55,7 +55,7 @@ export default function SpeechScreen() {
     }
   };
 
-  if (!status?.connected) {
+  if (!status?.connected || !robotUrl) {
     return (
       <SafeAreaView style={styles.container} edges={['bottom']}>
         <View style={styles.notConnected}>
