@@ -177,12 +177,16 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
         return { success: false, message: errorMsg };
       }
     } catch (error: any) {
-      console.error('Error connecting to robot:', error);
+      // Don't use console.error in production to avoid error overlay
+      if (__DEV__) {
+        console.log('Connection error:', error?.message || error);
+      }
       let errorMsg = 'Cannot connect to NAO robot.\n\n';
       
-      if (error.code === 'ECONNREFUSED' || error.message?.includes('Network')) {
+      if (error.code === 'ECONNREFUSED' || error.code === 'ERR_NETWORK' || error.message?.includes('Network')) {
         errorMsg += 'Make sure:\n';
         errorMsg += '1. NAO REST server is running on the robot\n';
+        errorMsg += '   (SSH to NAO and run: python nao_rest_server.py)\n';
         errorMsg += '2. Your phone is on the same WiFi as NAO\n';
         errorMsg += '3. IP address is correct: ' + ip;
       } else if (error.code === 'ETIMEDOUT' || error.message?.includes('timeout')) {
@@ -221,9 +225,8 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
       const response = await axios.get(`${url}/api/robot/status`, { timeout: 5000 });
       set({ status: response.data });
     } catch (error: any) {
-      console.error('Error fetching status:', error);
       // If we can't reach the robot, mark as disconnected
-      if (error.code === 'ECONNREFUSED' || error.message?.includes('Network')) {
+      if (error.code === 'ECONNREFUSED' || error.code === 'ERR_NETWORK' || error.message?.includes('Network')) {
         set({ status: null, robotUrl: null });
       }
     }
@@ -237,7 +240,7 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
       const response = await axios.get(`${url}/api/robot/sensors`, { timeout: 5000 });
       set({ sensors: response.data });
     } catch (error: any) {
-      console.error('Error fetching sensors:', error);
+      // Silently handle sensor fetch errors
     }
   },
 
@@ -249,8 +252,7 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
       const response = await axios.get(`${url}/api/robot/gestures`, { timeout: 5000 });
       set({ gestures: response.data.gestures });
     } catch (error: any) {
-      console.error('Error fetching gestures:', error);
-      // Set default gestures
+      // Set default gestures on error
       set({ 
         gestures: [
           { name: "wave", description: "Wave hand", icon: "hand-wave" },
@@ -275,7 +277,7 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
     try {
       await axios.post(`${url}/api/robot/move`, { x, y, theta }, { timeout: 3000 });
     } catch (error: any) {
-      console.error('Error sending move command:', error);
+      // Silent error for move command
     }
   },
 
@@ -286,7 +288,7 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
     try {
       await axios.post(`${url}/api/robot/stop`, {}, { timeout: 3000 });
     } catch (error: any) {
-      console.error('Error stopping robot:', error);
+      // Silent error for stop command
     }
   },
 
@@ -300,8 +302,7 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
         throw new Error(response.data.message);
       }
     } catch (error: any) {
-      console.error('Error speaking:', error);
-      throw error;
+      throw new Error(error.response?.data?.message || error.message || 'Speech failed');
     }
   },
 
@@ -315,8 +316,7 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
         throw new Error(response.data.message);
       }
     } catch (error: any) {
-      console.error('Error executing gesture:', error);
-      throw error;
+      throw new Error(error.response?.data?.message || error.message || 'Gesture failed');
     }
   },
 
@@ -328,7 +328,7 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
       const response = await axios.get(`${url}/api/robot/camera/frame`, { timeout: 10000 });
       return response.data.frame;
     } catch (error: any) {
-      console.error('Error getting camera frame:', error);
+      // Silent error for camera frame
       return null;
     }
   },
