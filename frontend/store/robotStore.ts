@@ -22,6 +22,8 @@ export interface RobotStatus {
   robot_name: string;
   uptime: number;
   posture: string;
+  sdk_available?: boolean;
+  connection_mode?: string;
 }
 
 export interface SensorData {
@@ -48,6 +50,13 @@ export interface Gesture {
   icon: string;
 }
 
+export interface SDKStatus {
+  sdk_available: boolean;
+  qi_library: boolean;
+  naoqi_library: boolean;
+  instructions?: string;
+}
+
 interface RobotStore {
   // State
   savedRobots: RobotConfig[];
@@ -55,25 +64,29 @@ interface RobotStore {
   status: RobotStatus | null;
   sensors: SensorData | null;
   gestures: Gesture[];
+  sdkStatus: SDKStatus | null;
   isConnecting: boolean;
   isLoading: boolean;
   error: string | null;
+  connectionError: string | null;
   
   // Actions
   fetchSavedRobots: () => Promise<void>;
   saveRobot: (name: string, ip: string, port: number) => Promise<void>;
   deleteRobot: (id: string) => Promise<void>;
-  connectToRobot: (ip: string, port: number) => Promise<boolean>;
+  connectToRobot: (ip: string, port: number) => Promise<{ success: boolean; message: string }>;
   disconnectFromRobot: () => Promise<void>;
   fetchStatus: () => Promise<void>;
   fetchSensors: () => Promise<void>;
   fetchGestures: () => Promise<void>;
+  fetchSDKStatus: () => Promise<void>;
   sendMoveCommand: (x: number, y: number, theta: number) => Promise<void>;
   stopMovement: () => Promise<void>;
   speak: (text: string) => Promise<void>;
   executeGesture: (gestureName: string) => Promise<void>;
   setCurrentRobot: (robot: RobotConfig | null) => void;
   clearError: () => void;
+  clearConnectionError: () => void;
 }
 
 export const useRobotStore = create<RobotStore>((set, get) => ({
@@ -82,9 +95,11 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
   status: null,
   sensors: null,
   gestures: [],
+  sdkStatus: null,
   isConnecting: false,
   isLoading: false,
   error: null,
+  connectionError: null,
 
   fetchSavedRobots: async () => {
     set({ isLoading: true, error: null });
@@ -94,6 +109,15 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
     } catch (error: any) {
       console.error('Error fetching robots:', error);
       set({ error: error.message, isLoading: false });
+    }
+  },
+
+  fetchSDKStatus: async () => {
+    try {
+      const response = await axios.get(`${API_URL}/sdk-status`);
+      set({ sdkStatus: response.data });
+    } catch (error: any) {
+      console.error('Error fetching SDK status:', error);
     }
   },
 
@@ -126,28 +150,35 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
   },
 
   connectToRobot: async (ip: string, port: number) => {
-    set({ isConnecting: true, error: null });
+    set({ isConnecting: true, connectionError: null });
     try {
       const response = await axios.post(`${API_URL}/robot/connect`, {
         ip_address: ip,
         port
-      });
+      }, { timeout: 10000 }); // 10 second timeout for connection
+      
       if (response.data.success) {
         set({ 
           status: response.data.status, 
-          isConnecting: false 
+          isConnecting: false,
+          connectionError: null
         });
         // Fetch gestures after connection
         get().fetchGestures();
-        return true;
+        return { success: true, message: response.data.message };
       } else {
-        set({ error: response.data.message, isConnecting: false });
-        return false;
+        const errorMsg = response.data.message || 'Connection failed';
+        set({ 
+          connectionError: errorMsg, 
+          isConnecting: false 
+        });
+        return { success: false, message: errorMsg };
       }
     } catch (error: any) {
       console.error('Error connecting to robot:', error);
-      set({ error: error.message || 'Connection failed', isConnecting: false });
-      return false;
+      const errorMsg = error.response?.data?.message || error.message || 'Connection failed';
+      set({ connectionError: errorMsg, isConnecting: false });
+      return { success: false, message: errorMsg };
     }
   },
 
@@ -164,7 +195,8 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
           uptime: 0,
           posture: 'Unknown'
         },
-        sensors: null 
+        sensors: null,
+        connectionError: null
       });
     } catch (error: any) {
       console.error('Error disconnecting:', error);
@@ -216,7 +248,10 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
 
   speak: async (text: string) => {
     try {
-      await axios.post(`${API_URL}/robot/speak`, { text });
+      const response = await axios.post(`${API_URL}/robot/speak`, { text });
+      if (!response.data.success) {
+        throw new Error(response.data.message);
+      }
     } catch (error: any) {
       console.error('Error speaking:', error);
       throw error;
@@ -225,7 +260,10 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
 
   executeGesture: async (gestureName: string) => {
     try {
-      await axios.post(`${API_URL}/robot/gesture`, { gesture_name: gestureName });
+      const response = await axios.post(`${API_URL}/robot/gesture`, { gesture_name: gestureName });
+      if (!response.data.success) {
+        throw new Error(response.data.message);
+      }
     } catch (error: any) {
       console.error('Error executing gesture:', error);
       throw error;
@@ -238,5 +276,9 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
 
   clearError: () => {
     set({ error: null });
+  },
+
+  clearConnectionError: () => {
+    set({ connectionError: null });
   }
 }));

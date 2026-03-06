@@ -9,6 +9,7 @@ import {
   Alert,
   KeyboardAvoidingView,
   Platform,
+  Modal,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
@@ -21,8 +22,11 @@ export default function ConnectScreen() {
   const {
     savedRobots,
     status,
+    sdkStatus,
     isConnecting,
+    connectionError,
     fetchSavedRobots,
+    fetchSDKStatus,
     saveRobot,
     deleteRobot,
     connectToRobot,
@@ -30,15 +34,18 @@ export default function ConnectScreen() {
     setCurrentRobot,
     error,
     clearError,
+    clearConnectionError,
   } = useRobotStore();
 
   const [robotName, setRobotName] = useState('');
   const [ipAddress, setIpAddress] = useState('');
   const [port, setPort] = useState('9559');
   const [showSaved, setShowSaved] = useState(false);
+  const [showErrorModal, setShowErrorModal] = useState(false);
 
   useEffect(() => {
     fetchSavedRobots();
+    fetchSDKStatus();
   }, []);
 
   useEffect(() => {
@@ -47,6 +54,12 @@ export default function ConnectScreen() {
       clearError();
     }
   }, [error]);
+
+  useEffect(() => {
+    if (connectionError) {
+      setShowErrorModal(true);
+    }
+  }, [connectionError]);
 
   const validateIP = (ip: string) => {
     const regex = /^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$/;
@@ -63,8 +76,8 @@ export default function ConnectScreen() {
       return;
     }
     const portNum = parseInt(port) || 9559;
-    const success = await connectToRobot(ipAddress, portNum);
-    if (success) {
+    const result = await connectToRobot(ipAddress, portNum);
+    if (result.success) {
       Alert.alert('Success', 'Connected to NAO robot!');
     }
   };
@@ -102,6 +115,11 @@ export default function ConnectScreen() {
     );
   };
 
+  const handleCloseErrorModal = () => {
+    setShowErrorModal(false);
+    clearConnectionError();
+  };
+
   return (
     <SafeAreaView style={styles.container} edges={['bottom']}>
       <KeyboardAvoidingView
@@ -126,6 +144,30 @@ export default function ConnectScreen() {
             </Text>
           </View>
 
+          {/* SDK Status Warning */}
+          {sdkStatus && !sdkStatus.sdk_available && (
+            <Card style={styles.warningCard}>
+              <View style={styles.warningContent}>
+                <Ionicons name="warning" size={24} color={COLORS.warning} />
+                <View style={styles.warningText}>
+                  <Text style={styles.warningTitle}>NAOqi SDK Not Installed</Text>
+                  <Text style={styles.warningDesc}>
+                    Real robot connection requires NAOqi SDK. To install:
+                  </Text>
+                  <Text style={styles.warningStep}>
+                    1. Download SDK from SoftBank Robotics
+                  </Text>
+                  <Text style={styles.warningStep}>
+                    2. Extract and add to PYTHONPATH
+                  </Text>
+                  <Text style={styles.warningStep}>
+                    3. Restart the backend server
+                  </Text>
+                </View>
+              </View>
+            </Card>
+          )}
+
           {/* Connection Status */}
           {status?.connected && (
             <Card style={styles.statusCard}>
@@ -133,7 +175,13 @@ export default function ConnectScreen() {
                 <View style={styles.statusRow}>
                   <View style={styles.statusDot} />
                   <Text style={styles.connectedText}>Connected</Text>
+                  {status.connection_mode && (
+                    <View style={styles.modeBadge}>
+                      <Text style={styles.modeText}>{status.connection_mode}</Text>
+                    </View>
+                  )}
                 </View>
+                <Text style={styles.ipText}>{status.ip_address}:9559</Text>
                 <View style={styles.statsRow}>
                   <View style={styles.statItem}>
                     <Text style={styles.statValue}>{status.battery_level}%</Text>
@@ -184,6 +232,9 @@ export default function ConnectScreen() {
                   keyboardType="numeric"
                   autoCapitalize="none"
                 />
+                <Text style={styles.hint}>
+                  Press NAO's chest button to hear the IP address
+                </Text>
               </View>
 
               <View style={styles.inputGroup}>
@@ -200,9 +251,10 @@ export default function ConnectScreen() {
 
               <View style={styles.buttonRow}>
                 <Button
-                  title="Connect"
+                  title={isConnecting ? 'Connecting...' : 'Connect'}
                   onPress={handleConnect}
                   loading={isConnecting}
+                  disabled={!sdkStatus?.sdk_available}
                   style={{ flex: 1 }}
                 />
                 <Button
@@ -213,6 +265,12 @@ export default function ConnectScreen() {
                   icon={<Ionicons name="bookmark" size={18} color={COLORS.primary} />}
                 />
               </View>
+              
+              {!sdkStatus?.sdk_available && (
+                <Text style={styles.disabledHint}>
+                  Connection disabled - NAOqi SDK required
+                </Text>
+              )}
             </Card>
           )}
 
@@ -265,18 +323,52 @@ export default function ConnectScreen() {
             </Card>
           )}
 
-          {/* Info Card */}
-          <Card style={styles.infoCard}>
-            <View style={styles.infoRow}>
-              <Ionicons name="information-circle" size={20} color={COLORS.primary} />
-              <Text style={styles.infoText}>
-                This app runs in simulation mode. Connect to any IP to test the interface.
-                For real robot connection, ensure NAOqi bridge is running.
+          {/* How to Find IP */}
+          <Card title="How to Find Robot IP" style={styles.helpCard}>
+            <View style={styles.helpStep}>
+              <Text style={styles.helpNumber}>1</Text>
+              <Text style={styles.helpText}>
+                Make sure NAO is powered on and connected to WiFi
+              </Text>
+            </View>
+            <View style={styles.helpStep}>
+              <Text style={styles.helpNumber}>2</Text>
+              <Text style={styles.helpText}>
+                Press the chest button once - NAO will say its IP address
+              </Text>
+            </View>
+            <View style={styles.helpStep}>
+              <Text style={styles.helpNumber}>3</Text>
+              <Text style={styles.helpText}>
+                Ensure this device is on the same network as NAO
               </Text>
             </View>
           </Card>
         </ScrollView>
       </KeyboardAvoidingView>
+
+      {/* Connection Error Modal */}
+      <Modal
+        visible={showErrorModal}
+        transparent
+        animationType="fade"
+        onRequestClose={handleCloseErrorModal}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContent}>
+            <View style={styles.modalHeader}>
+              <Ionicons name="close-circle" size={48} color={COLORS.error} />
+              <Text style={styles.modalTitle}>Connection Failed</Text>
+            </View>
+            <Text style={styles.modalMessage}>{connectionError}</Text>
+            <Button
+              title="OK"
+              onPress={handleCloseErrorModal}
+              style={{ marginTop: SPACING.lg }}
+            />
+          </View>
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -296,7 +388,7 @@ const styles = StyleSheet.create({
   header: {
     alignItems: 'center',
     marginBottom: SPACING.lg,
-    paddingVertical: SPACING.lg,
+    paddingVertical: SPACING.md,
   },
   robotIcon: {
     width: 80,
@@ -321,6 +413,34 @@ const styles = StyleSheet.create({
     color: COLORS.textSecondary,
     textAlign: 'center',
   },
+  warningCard: {
+    marginBottom: SPACING.md,
+    borderColor: COLORS.warning,
+    backgroundColor: 'rgba(255, 170, 0, 0.1)',
+  },
+  warningContent: {
+    flexDirection: 'row',
+    gap: SPACING.md,
+  },
+  warningText: {
+    flex: 1,
+  },
+  warningTitle: {
+    color: COLORS.warning,
+    fontSize: FONT_SIZES.md,
+    fontWeight: '600',
+    marginBottom: SPACING.xs,
+  },
+  warningDesc: {
+    color: COLORS.textSecondary,
+    fontSize: FONT_SIZES.sm,
+    marginBottom: SPACING.sm,
+  },
+  warningStep: {
+    color: COLORS.textSecondary,
+    fontSize: FONT_SIZES.sm,
+    marginLeft: SPACING.sm,
+  },
   statusCard: {
     marginBottom: SPACING.md,
     borderColor: COLORS.success,
@@ -332,7 +452,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: SPACING.sm,
-    marginBottom: SPACING.md,
+    marginBottom: SPACING.xs,
   },
   statusDot: {
     width: 10,
@@ -344,6 +464,23 @@ const styles = StyleSheet.create({
     color: COLORS.success,
     fontSize: FONT_SIZES.lg,
     fontWeight: '600',
+  },
+  modeBadge: {
+    backgroundColor: COLORS.primary,
+    paddingHorizontal: SPACING.sm,
+    paddingVertical: 2,
+    borderRadius: BORDER_RADIUS.sm,
+  },
+  modeText: {
+    color: '#000',
+    fontSize: FONT_SIZES.xs,
+    fontWeight: '600',
+    textTransform: 'uppercase',
+  },
+  ipText: {
+    color: COLORS.textSecondary,
+    fontSize: FONT_SIZES.sm,
+    marginBottom: SPACING.md,
   },
   statsRow: {
     flexDirection: 'row',
@@ -380,6 +517,18 @@ const styles = StyleSheet.create({
     fontSize: FONT_SIZES.md,
     borderWidth: 1,
     borderColor: COLORS.border,
+  },
+  hint: {
+    color: COLORS.textMuted,
+    fontSize: FONT_SIZES.xs,
+    marginTop: SPACING.xs,
+    fontStyle: 'italic',
+  },
+  disabledHint: {
+    color: COLORS.warning,
+    fontSize: FONT_SIZES.sm,
+    textAlign: 'center',
+    marginTop: SPACING.md,
   },
   buttonRow: {
     flexDirection: 'row',
@@ -442,19 +591,62 @@ const styles = StyleSheet.create({
   deleteBtn: {
     padding: SPACING.sm,
   },
-  infoCard: {
+  helpCard: {
     marginTop: SPACING.md,
-    backgroundColor: 'rgba(0, 168, 255, 0.1)',
-    borderColor: COLORS.primary,
   },
-  infoRow: {
+  helpStep: {
     flexDirection: 'row',
-    gap: SPACING.sm,
+    alignItems: 'flex-start',
+    gap: SPACING.md,
+    marginBottom: SPACING.md,
   },
-  infoText: {
+  helpNumber: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    backgroundColor: COLORS.primary,
+    color: '#000',
+    fontSize: FONT_SIZES.sm,
+    fontWeight: '700',
+    textAlign: 'center',
+    lineHeight: 24,
+  },
+  helpText: {
+    flex: 1,
     color: COLORS.textSecondary,
     fontSize: FONT_SIZES.sm,
-    flex: 1,
     lineHeight: 20,
+  },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: COLORS.overlay,
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: SPACING.lg,
+  },
+  modalContent: {
+    backgroundColor: COLORS.surface,
+    borderRadius: BORDER_RADIUS.lg,
+    padding: SPACING.lg,
+    width: '100%',
+    maxWidth: 400,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+  },
+  modalHeader: {
+    alignItems: 'center',
+    marginBottom: SPACING.md,
+  },
+  modalTitle: {
+    color: COLORS.text,
+    fontSize: FONT_SIZES.xl,
+    fontWeight: '700',
+    marginTop: SPACING.sm,
+  },
+  modalMessage: {
+    color: COLORS.textSecondary,
+    fontSize: FONT_SIZES.md,
+    lineHeight: 22,
+    textAlign: 'center',
   },
 });
