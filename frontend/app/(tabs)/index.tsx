@@ -38,10 +38,13 @@ export default function ConnectScreen() {
   } = useRobotStore();
 
   const [robotName, setRobotName] = useState('');
-  const [ipAddress, setIpAddress] = useState('');
+  const [ipAddress, setIpAddress] = useState('172.18.16.35');
   const [port, setPort] = useState('9559');
+  const [username, setUsername] = useState('nao');
+  const [password, setPassword] = useState('nao');
   const [showSaved, setShowSaved] = useState(false);
   const [showErrorModal, setShowErrorModal] = useState(false);
+  const [showAdvanced, setShowAdvanced] = useState(false);
 
   useEffect(() => {
     fetchSavedRobots();
@@ -76,7 +79,7 @@ export default function ConnectScreen() {
       return;
     }
     const portNum = parseInt(port) || 9559;
-    const result = await connectToRobot(ipAddress, portNum);
+    const result = await connectToRobot(ipAddress, portNum, username, password);
     if (result.success) {
       Alert.alert('Success', 'Connected to NAO robot!');
     }
@@ -144,29 +147,18 @@ export default function ConnectScreen() {
             </Text>
           </View>
 
-          {/* SDK Status Warning */}
-          {sdkStatus && !sdkStatus.sdk_available && (
-            <Card style={styles.warningCard}>
-              <View style={styles.warningContent}>
-                <Ionicons name="warning" size={24} color={COLORS.warning} />
-                <View style={styles.warningText}>
-                  <Text style={styles.warningTitle}>NAOqi SDK Not Installed</Text>
-                  <Text style={styles.warningDesc}>
-                    Real robot connection requires NAOqi SDK. To install:
-                  </Text>
-                  <Text style={styles.warningStep}>
-                    1. Download SDK from SoftBank Robotics
-                  </Text>
-                  <Text style={styles.warningStep}>
-                    2. Extract and add to PYTHONPATH
-                  </Text>
-                  <Text style={styles.warningStep}>
-                    3. Restart the backend server
-                  </Text>
-                </View>
+          {/* Connection Method Info */}
+          <Card style={styles.infoCard}>
+            <View style={styles.infoContent}>
+              <Ionicons name="information-circle" size={24} color={COLORS.primary} />
+              <View style={styles.infoText}>
+                <Text style={styles.infoTitle}>SSH Connection Mode</Text>
+                <Text style={styles.infoDesc}>
+                  This app connects to your NAO robot via SSH and executes NAOqi commands directly on the robot.
+                </Text>
               </View>
-            </Card>
-          )}
+            </View>
+          </Card>
 
           {/* Connection Status */}
           {status?.connected && (
@@ -227,7 +219,7 @@ export default function ConnectScreen() {
                   style={styles.input}
                   value={ipAddress}
                   onChangeText={setIpAddress}
-                  placeholder="192.168.1.105"
+                  placeholder="172.18.16.35"
                   placeholderTextColor={COLORS.textMuted}
                   keyboardType="numeric"
                   autoCapitalize="none"
@@ -249,12 +241,55 @@ export default function ConnectScreen() {
                 />
               </View>
 
+              {/* Advanced Settings Toggle */}
+              <TouchableOpacity 
+                style={styles.advancedToggle}
+                onPress={() => setShowAdvanced(!showAdvanced)}
+              >
+                <Text style={styles.advancedToggleText}>SSH Credentials</Text>
+                <Ionicons 
+                  name={showAdvanced ? 'chevron-up' : 'chevron-down'} 
+                  size={20} 
+                  color={COLORS.textSecondary} 
+                />
+              </TouchableOpacity>
+
+              {showAdvanced && (
+                <>
+                  <View style={styles.inputGroup}>
+                    <Text style={styles.label}>SSH Username</Text>
+                    <TextInput
+                      style={styles.input}
+                      value={username}
+                      onChangeText={setUsername}
+                      placeholder="nao"
+                      placeholderTextColor={COLORS.textMuted}
+                      autoCapitalize="none"
+                    />
+                  </View>
+
+                  <View style={styles.inputGroup}>
+                    <Text style={styles.label}>SSH Password</Text>
+                    <TextInput
+                      style={styles.input}
+                      value={password}
+                      onChangeText={setPassword}
+                      placeholder="nao"
+                      placeholderTextColor={COLORS.textMuted}
+                      secureTextEntry
+                    />
+                    <Text style={styles.hint}>
+                      Default credentials: nao / nao
+                    </Text>
+                  </View>
+                </>
+              )}
+
               <View style={styles.buttonRow}>
                 <Button
                   title={isConnecting ? 'Connecting...' : 'Connect'}
                   onPress={handleConnect}
                   loading={isConnecting}
-                  disabled={!sdkStatus?.sdk_available}
                   style={{ flex: 1 }}
                 />
                 <Button
@@ -265,12 +300,6 @@ export default function ConnectScreen() {
                   icon={<Ionicons name="bookmark" size={18} color={COLORS.primary} />}
                 />
               </View>
-              
-              {!sdkStatus?.sdk_available && (
-                <Text style={styles.disabledHint}>
-                  Connection disabled - NAOqi SDK required
-                </Text>
-              )}
             </Card>
           )}
 
@@ -324,7 +353,7 @@ export default function ConnectScreen() {
           )}
 
           {/* How to Find IP */}
-          <Card title="How to Find Robot IP" style={styles.helpCard}>
+          <Card title="Troubleshooting" style={styles.helpCard}>
             <View style={styles.helpStep}>
               <Text style={styles.helpNumber}>1</Text>
               <Text style={styles.helpText}>
@@ -340,7 +369,13 @@ export default function ConnectScreen() {
             <View style={styles.helpStep}>
               <Text style={styles.helpNumber}>3</Text>
               <Text style={styles.helpText}>
-                Ensure this device is on the same network as NAO
+                Ensure this server can reach the robot's IP (same network or VPN)
+              </Text>
+            </View>
+            <View style={styles.helpStep}>
+              <Text style={styles.helpNumber}>4</Text>
+              <Text style={styles.helpText}>
+                SSH must be enabled on NAO (port 22) - this is on by default
               </Text>
             </View>
           </Card>
@@ -413,33 +448,28 @@ const styles = StyleSheet.create({
     color: COLORS.textSecondary,
     textAlign: 'center',
   },
-  warningCard: {
+  infoCard: {
     marginBottom: SPACING.md,
-    borderColor: COLORS.warning,
-    backgroundColor: 'rgba(255, 170, 0, 0.1)',
+    borderColor: COLORS.primary,
+    backgroundColor: 'rgba(0, 168, 255, 0.1)',
   },
-  warningContent: {
+  infoContent: {
     flexDirection: 'row',
     gap: SPACING.md,
   },
-  warningText: {
+  infoText: {
     flex: 1,
   },
-  warningTitle: {
-    color: COLORS.warning,
+  infoTitle: {
+    color: COLORS.primary,
     fontSize: FONT_SIZES.md,
     fontWeight: '600',
     marginBottom: SPACING.xs,
   },
-  warningDesc: {
+  infoDesc: {
     color: COLORS.textSecondary,
     fontSize: FONT_SIZES.sm,
-    marginBottom: SPACING.sm,
-  },
-  warningStep: {
-    color: COLORS.textSecondary,
-    fontSize: FONT_SIZES.sm,
-    marginLeft: SPACING.sm,
+    lineHeight: 20,
   },
   statusCard: {
     marginBottom: SPACING.md,
@@ -524,11 +554,19 @@ const styles = StyleSheet.create({
     marginTop: SPACING.xs,
     fontStyle: 'italic',
   },
-  disabledHint: {
-    color: COLORS.warning,
+  advancedToggle: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingVertical: SPACING.sm,
+    marginBottom: SPACING.md,
+    borderTopWidth: 1,
+    borderTopColor: COLORS.border,
+    marginTop: SPACING.sm,
+  },
+  advancedToggleText: {
+    color: COLORS.textSecondary,
     fontSize: FONT_SIZES.sm,
-    textAlign: 'center',
-    marginTop: SPACING.md,
   },
   buttonRow: {
     flexDirection: 'row',

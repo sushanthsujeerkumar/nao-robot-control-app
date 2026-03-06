@@ -74,7 +74,7 @@ interface RobotStore {
   fetchSavedRobots: () => Promise<void>;
   saveRobot: (name: string, ip: string, port: number) => Promise<void>;
   deleteRobot: (id: string) => Promise<void>;
-  connectToRobot: (ip: string, port: number) => Promise<{ success: boolean; message: string }>;
+  connectToRobot: (ip: string, port: number, username?: string, password?: string) => Promise<{ success: boolean; message: string }>;
   disconnectFromRobot: () => Promise<void>;
   fetchStatus: () => Promise<void>;
   fetchSensors: () => Promise<void>;
@@ -149,13 +149,15 @@ export const useRobotStore = create<RobotStore>((set, get) => ({
     }
   },
 
-  connectToRobot: async (ip: string, port: number) => {
+  connectToRobot: async (ip: string, port: number, username: string = "nao", password: string = "nao") => {
     set({ isConnecting: true, connectionError: null });
     try {
       const response = await axios.post(`${API_URL}/robot/connect`, {
         ip_address: ip,
-        port
-      }, { timeout: 10000 }); // 10 second timeout for connection
+        port,
+        username,
+        password
+      }, { timeout: 30000 }); // 30 second timeout for SSH connection
       
       if (response.data.success) {
         set({ 

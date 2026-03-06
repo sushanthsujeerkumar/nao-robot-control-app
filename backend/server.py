@@ -15,6 +15,7 @@ import json
 import base64
 import io
 import socket
+import paramiko
 import threading
 import time
 
@@ -39,26 +40,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ==================== NAOqi SDK Import ====================
-# Try to import real NAOqi SDK
-NAOQI_AVAILABLE = False
-qi = None
-naoqi = None
-
-try:
-    import qi
-    NAOQI_AVAILABLE = True
-    logger.info("qi library loaded successfully")
-except ImportError:
-    try:
-        from naoqi import ALProxy
-        naoqi = True
-        NAOQI_AVAILABLE = True
-        logger.info("naoqi library loaded successfully")
-    except ImportError:
-        logger.warning("NAOqi SDK not available - real robot connection disabled")
-        logger.warning("To enable real robot connection, install the NAOqi SDK")
-
 # ==================== Models ====================
 
 class RobotConfig(BaseModel):
@@ -77,16 +58,18 @@ class RobotConfigCreate(BaseModel):
 class RobotConnection(BaseModel):
     ip_address: str
     port: int = 9559
+    username: str = "nao"
+    password: str = "nao"
 
 class MoveCommand(BaseModel):
-    x: float  # Forward/backward velocity (-1 to 1)
-    y: float  # Left/right velocity (-1 to 1)
-    theta: float  # Rotation velocity (-1 to 1)
+    x: float
+    y: float
+    theta: float
 
 class SpeechCommand(BaseModel):
     text: str
     language: str = "en"
-    volume: float = 1.0  # 0.0 to 1.0
+    volume: float = 1.0
 
 class GestureCommand(BaseModel):
     gesture_name: str
@@ -100,7 +83,6 @@ class RobotStatus(BaseModel):
     robot_name: str = "NAO"
     uptime: int = 0
     posture: str = "Unknown"
-    sdk_available: bool = False
     connection_mode: str = "none"
 
 class SensorData(BaseModel):
@@ -120,19 +102,22 @@ class SensorData(BaseModel):
     temperature_battery: float = 35.0
     timestamp: datetime = Field(default_factory=datetime.utcnow)
 
-# ==================== Real NAO Robot Controller ====================
+# ==================== NAO Robot Controller via SSH ====================
 
-class NAORobotController:
-    """Controls a real NAO robot via NAOqi SDK"""
+class NAORobotSSHController:
+    """Controls a real NAO robot via SSH and NAOqi Python commands"""
     
     def __init__(self):
         self.connected = False
         self.ip_address = None
         self.port = 9559
-        self.session = None
-        self._proxies = {}
+        self.ssh_client = None
+        self.username = "nao"
+        self.password = "nao"
         self._start_time = None
-        self.connection_mode = "none"  # "real", "simulation", or "none"
+        self.connection_mode = "none"
+        self._cache = {}
+        self._cache_time = {}
         
     def _check_robot_reachable(self, ip: str, port: int, timeout: float = 3.0) -> bool:
         """Check if robot is reachable on the network"""
@@ -146,156 +131,218 @@ class NAORobotController:
             logger.error(f"Network check failed: {e}")
             return False
     
-    def connect(self, ip_address: str, port: int) -> dict:
-        """Connect to the NAO robot"""
+    def _check_ssh_reachable(self, ip: str, timeout: float = 3.0) -> bool:
+        """Check if SSH port is reachable"""
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(timeout)
+            result = sock.connect_ex((ip, 22))
+            sock.close()
+            return result == 0
+        except Exception as e:
+            logger.error(f"SSH check failed: {e}")
+            return False
+    
+    def _execute_on_robot(self, python_code: str, timeout: float = 10.0) -> tuple:
+        """Execute Python code on the NAO robot via SSH"""
+        if not self.ssh_client:
+            return None, "Not connected"
+        
+        # Wrap code in a Python command
+        full_code = f'''python2 << 'NAOCODE'
+# -*- coding: utf-8 -*-
+from naoqi import ALProxy
+import json
+
+robot_ip = "127.0.0.1"
+port = 9559
+
+try:
+{self._indent_code(python_code)}
+except Exception as e:
+    print(json.dumps({{"error": str(e)}}))
+NAOCODE'''
+        
+        try:
+            stdin, stdout, stderr = self.ssh_client.exec_command(full_code, timeout=timeout)
+            output = stdout.read().decode('utf-8').strip()
+            error = stderr.read().decode('utf-8').strip()
+            return output, error
+        except Exception as e:
+            logger.error(f"SSH command failed: {e}")
+            return None, str(e)
+    
+    def _indent_code(self, code: str, spaces: int = 4) -> str:
+        """Indent code for embedding in try block"""
+        return '\n'.join(' ' * spaces + line for line in code.split('\n'))
+    
+    def connect(self, ip_address: str, port: int, username: str = "nao", password: str = "nao") -> dict:
+        """Connect to the NAO robot via SSH"""
         self.ip_address = ip_address
         self.port = port
+        self.username = username
+        self.password = password
         
-        # First check if robot is reachable
-        logger.info(f"Checking if robot is reachable at {ip_address}:{port}...")
+        logger.info(f"Attempting to connect to NAO at {ip_address}...")
         
+        # Check NAOqi port
         if not self._check_robot_reachable(ip_address, port):
             return {
                 "success": False,
-                "message": f"Cannot reach robot at {ip_address}:{port}. Please check:\n"
+                "message": f"Cannot reach NAOqi at {ip_address}:{port}. Please check:\n"
                            "1. Robot is powered on\n"
                            "2. Robot and this device are on the same network\n"
-                           "3. IP address is correct (press NAO's chest button to hear IP)\n"
-                           "4. Port 9559 is not blocked by firewall",
+                           "3. IP address is correct (press NAO's chest button to hear IP)",
                 "connected": False
             }
         
-        logger.info(f"Robot reachable at {ip_address}:{port}")
+        logger.info(f"NAOqi port {port} is reachable")
         
-        # Try to connect using NAOqi SDK
-        if NAOQI_AVAILABLE:
-            try:
-                if qi:
-                    # Using modern qi library
-                    self.session = qi.Session()
-                    self.session.connect(f"tcp://{ip_address}:{port}")
-                    self.connection_mode = "real"
-                    logger.info(f"Connected to NAO robot using qi library")
-                elif naoqi:
-                    # Using legacy naoqi library - test with ALProxy
-                    from naoqi import ALProxy
-                    test_proxy = ALProxy("ALTextToSpeech", ip_address, port)
-                    self.connection_mode = "real"
-                    logger.info(f"Connected to NAO robot using naoqi library")
-                
+        # Check SSH port
+        if not self._check_ssh_reachable(ip_address):
+            return {
+                "success": False,
+                "message": f"Cannot reach SSH at {ip_address}:22. SSH access is required.",
+                "connected": False
+            }
+        
+        logger.info("SSH port 22 is reachable")
+        
+        # Try SSH connection
+        try:
+            self.ssh_client = paramiko.SSHClient()
+            self.ssh_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            self.ssh_client.connect(
+                ip_address, 
+                port=22, 
+                username=username, 
+                password=password,
+                timeout=10,
+                allow_agent=False,
+                look_for_keys=False
+            )
+            logger.info("SSH connection established")
+            
+            # Test NAOqi connection
+            test_code = '''
+tts = ALProxy("ALTextToSpeech", robot_ip, port)
+print(json.dumps({"success": True, "message": "Connected"}))
+'''
+            output, error = self._execute_on_robot(test_code)
+            
+            if output and "success" in output:
                 self.connected = True
                 self._start_time = datetime.utcnow()
-                self._proxies = {}  # Clear old proxies
+                self.connection_mode = "ssh"
+                
+                # Make robot say connected
+                self._execute_on_robot('''
+tts = ALProxy("ALTextToSpeech", robot_ip, port)
+tts.say("Connected to remote control")
+''')
                 
                 return {
                     "success": True,
-                    "message": f"Successfully connected to NAO robot at {ip_address}:{port}",
+                    "message": f"Successfully connected to NAO at {ip_address}",
                     "connected": True,
-                    "mode": "real"
+                    "mode": "ssh"
                 }
-                
-            except Exception as e:
-                logger.error(f"NAOqi connection failed: {e}")
+            else:
+                self.ssh_client.close()
+                self.ssh_client = None
                 return {
                     "success": False,
-                    "message": f"NAOqi connection failed: {str(e)}. "
-                               "Robot is reachable but NAOqi service may not be running.",
+                    "message": f"SSH connected but NAOqi test failed: {error or output}",
                     "connected": False
                 }
-        else:
+                
+        except paramiko.AuthenticationException:
             return {
                 "success": False,
-                "message": "NAOqi SDK is not installed. Please install the NAOqi Python SDK:\n"
-                           "1. Download SDK from SoftBank Robotics\n"
-                           "2. Extract and add to PYTHONPATH\n"
-                           "3. Or install qi library: pip install qi",
-                "connected": False,
-                "sdk_required": True
+                "message": f"SSH authentication failed. Default credentials are nao/nao. "
+                           "Check if password was changed.",
+                "connected": False
+            }
+        except Exception as e:
+            logger.error(f"Connection failed: {e}")
+            return {
+                "success": False,
+                "message": f"Connection failed: {str(e)}",
+                "connected": False
             }
     
     def disconnect(self):
         """Disconnect from the robot"""
-        if self.session and qi:
+        if self.ssh_client:
             try:
-                self.session.close()
+                self._execute_on_robot('''
+tts = ALProxy("ALTextToSpeech", robot_ip, port)
+tts.say("Disconnecting")
+''')
+                self.ssh_client.close()
             except:
                 pass
         self.connected = False
-        self.session = None
-        self._proxies = {}
+        self.ssh_client = None
         self.connection_mode = "none"
+        self._cache = {}
         logger.info("Disconnected from NAO robot")
-    
-    def _get_proxy(self, service_name: str):
-        """Get or create a proxy for a NAOqi service"""
-        if service_name not in self._proxies:
-            if qi and self.session:
-                self._proxies[service_name] = self.session.service(service_name)
-            elif naoqi:
-                from naoqi import ALProxy
-                self._proxies[service_name] = ALProxy(service_name, self.ip_address, self.port)
-        return self._proxies.get(service_name)
     
     def get_status(self) -> RobotStatus:
         """Get current robot status"""
         if not self.connected:
-            return RobotStatus(
-                connected=False,
-                sdk_available=NAOQI_AVAILABLE,
-                connection_mode=self.connection_mode
-            )
+            return RobotStatus(connected=False, connection_mode="none")
+        
+        uptime = 0
+        if self._start_time:
+            uptime = int((datetime.utcnow() - self._start_time).total_seconds())
+        
+        # Get battery and posture (with caching)
+        battery_level = 100
+        posture = "Unknown"
+        temperature = 40.0
         
         try:
-            battery_level = 100
-            temperature = 40.0
-            posture = "Unknown"
-            uptime = 0
-            
-            if self._start_time:
-                uptime = int((datetime.utcnow() - self._start_time).total_seconds())
-            
-            # Try to get real data from robot
-            try:
-                battery_proxy = self._get_proxy("ALBattery")
-                if battery_proxy:
-                    battery_level = battery_proxy.getBatteryCharge()
-            except Exception as e:
-                logger.debug(f"Could not get battery: {e}")
-            
-            try:
-                memory_proxy = self._get_proxy("ALMemory")
-                if memory_proxy:
-                    temperature = memory_proxy.getData("Device/SubDeviceList/Head/Temperature/Sensor/Value")
-            except Exception as e:
-                logger.debug(f"Could not get temperature: {e}")
-            
-            try:
-                posture_proxy = self._get_proxy("ALRobotPosture")
-                if posture_proxy:
-                    posture = posture_proxy.getPostureFamily()
-            except Exception as e:
-                logger.debug(f"Could not get posture: {e}")
-            
-            return RobotStatus(
-                connected=True,
-                ip_address=self.ip_address,
-                battery_level=battery_level,
-                temperature=temperature,
-                robot_name="NAO V5",
-                uptime=uptime,
-                posture=posture,
-                sdk_available=NAOQI_AVAILABLE,
-                connection_mode=self.connection_mode
-            )
-            
+            code = '''
+battery = ALProxy("ALBattery", robot_ip, port)
+posture = ALProxy("ALRobotPosture", robot_ip, port)
+memory = ALProxy("ALMemory", robot_ip, port)
+
+battery_level = battery.getBatteryCharge()
+current_posture = posture.getPostureFamily()
+try:
+    temp = memory.getData("Device/SubDeviceList/Head/Temperature/Sensor/Value")
+except:
+    temp = 40.0
+
+print(json.dumps({
+    "battery": battery_level,
+    "posture": current_posture,
+    "temperature": temp
+}))
+'''
+            output, error = self._execute_on_robot(code)
+            if output:
+                try:
+                    data = json.loads(output)
+                    battery_level = data.get("battery", 100)
+                    posture = data.get("posture", "Unknown")
+                    temperature = data.get("temperature", 40.0)
+                except:
+                    pass
         except Exception as e:
             logger.error(f"Error getting status: {e}")
-            return RobotStatus(
-                connected=self.connected,
-                ip_address=self.ip_address,
-                sdk_available=NAOQI_AVAILABLE,
-                connection_mode=self.connection_mode
-            )
+        
+        return RobotStatus(
+            connected=True,
+            ip_address=self.ip_address,
+            battery_level=battery_level,
+            temperature=temperature,
+            robot_name="NAO V5",
+            uptime=uptime,
+            posture=posture,
+            connection_mode=self.connection_mode
+        )
     
     def get_sensors(self) -> SensorData:
         """Get sensor data from the robot"""
@@ -303,25 +350,44 @@ class NAORobotController:
             return SensorData()
         
         try:
-            memory = self._get_proxy("ALMemory")
-            
-            if memory:
-                return SensorData(
-                    head_touch_front=bool(memory.getData("Device/SubDeviceList/Head/Touch/Front/Sensor/Value")),
-                    head_touch_middle=bool(memory.getData("Device/SubDeviceList/Head/Touch/Middle/Sensor/Value")),
-                    head_touch_rear=bool(memory.getData("Device/SubDeviceList/Head/Touch/Rear/Sensor/Value")),
-                    left_hand_touch=bool(memory.getData("Device/SubDeviceList/LHand/Touch/Back/Sensor/Value")),
-                    right_hand_touch=bool(memory.getData("Device/SubDeviceList/RHand/Touch/Back/Sensor/Value")),
-                    sonar_left=float(memory.getData("Device/SubDeviceList/US/Left/Sensor/Value")),
-                    sonar_right=float(memory.getData("Device/SubDeviceList/US/Right/Sensor/Value")),
-                    battery_level=int(memory.getData("Device/SubDeviceList/Battery/Charge/Sensor/Value")),
-                    head_yaw=float(memory.getData("Device/SubDeviceList/HeadYaw/Position/Sensor/Value")),
-                    head_pitch=float(memory.getData("Device/SubDeviceList/HeadPitch/Position/Sensor/Value")),
-                    left_shoulder_pitch=float(memory.getData("Device/SubDeviceList/LShoulderPitch/Position/Sensor/Value")),
-                    right_shoulder_pitch=float(memory.getData("Device/SubDeviceList/RShoulderPitch/Position/Sensor/Value")),
-                    temperature_cpu=float(memory.getData("Device/SubDeviceList/Head/Temperature/Sensor/Value")),
-                    temperature_battery=float(memory.getData("Device/SubDeviceList/Battery/Temperature/Sensor/Value")),
-                )
+            code = '''
+memory = ALProxy("ALMemory", robot_ip, port)
+battery = ALProxy("ALBattery", robot_ip, port)
+
+data = {
+    "head_touch_front": bool(memory.getData("Device/SubDeviceList/Head/Touch/Front/Sensor/Value")),
+    "head_touch_middle": bool(memory.getData("Device/SubDeviceList/Head/Touch/Middle/Sensor/Value")),
+    "head_touch_rear": bool(memory.getData("Device/SubDeviceList/Head/Touch/Rear/Sensor/Value")),
+    "left_hand_touch": bool(memory.getData("Device/SubDeviceList/LHand/Touch/Back/Sensor/Value")),
+    "right_hand_touch": bool(memory.getData("Device/SubDeviceList/RHand/Touch/Back/Sensor/Value")),
+    "sonar_left": float(memory.getData("Device/SubDeviceList/US/Left/Sensor/Value") or 0),
+    "sonar_right": float(memory.getData("Device/SubDeviceList/US/Right/Sensor/Value") or 0),
+    "battery_level": int(battery.getBatteryCharge()),
+    "head_yaw": float(memory.getData("Device/SubDeviceList/HeadYaw/Position/Sensor/Value") or 0),
+    "head_pitch": float(memory.getData("Device/SubDeviceList/HeadPitch/Position/Sensor/Value") or 0),
+    "left_shoulder_pitch": float(memory.getData("Device/SubDeviceList/LShoulderPitch/Position/Sensor/Value") or 0),
+    "right_shoulder_pitch": float(memory.getData("Device/SubDeviceList/RShoulderPitch/Position/Sensor/Value") or 0),
+}
+
+try:
+    data["temperature_cpu"] = float(memory.getData("Device/SubDeviceList/Head/Temperature/Sensor/Value") or 40)
+except:
+    data["temperature_cpu"] = 40.0
+
+try:
+    data["temperature_battery"] = float(memory.getData("Device/SubDeviceList/Battery/Temperature/Sensor/Value") or 35)
+except:
+    data["temperature_battery"] = 35.0
+
+print(json.dumps(data))
+'''
+            output, error = self._execute_on_robot(code)
+            if output:
+                try:
+                    data = json.loads(output)
+                    return SensorData(**data)
+                except Exception as e:
+                    logger.error(f"Error parsing sensor data: {e}")
         except Exception as e:
             logger.error(f"Error getting sensors: {e}")
         
@@ -333,27 +399,30 @@ class NAORobotController:
             return {"success": False, "message": "Robot not connected"}
         
         try:
-            motion = self._get_proxy("ALMotion")
-            if motion:
-                # Wake up robot if needed
-                motion.wakeUp()
-                # Send movement command
-                motion.moveToward(x, y, theta)
-                
-                direction = "stopped"
-                if abs(x) > 0.1:
-                    direction = "forward" if x > 0 else "backward"
-                elif abs(theta) > 0.1:
-                    direction = "turning left" if theta > 0 else "turning right"
-                elif abs(y) > 0.1:
-                    direction = "strafing left" if y > 0 else "strafing right"
-                
+            code = f'''
+motion = ALProxy("ALMotion", robot_ip, port)
+motion.wakeUp()
+motion.moveToward({x}, {y}, {theta})
+print(json.dumps({{"success": True}}))
+'''
+            output, error = self._execute_on_robot(code)
+            
+            direction = "stopped"
+            if abs(x) > 0.1:
+                direction = "forward" if x > 0 else "backward"
+            elif abs(theta) > 0.1:
+                direction = "turning left" if theta > 0 else "turning right"
+            elif abs(y) > 0.1:
+                direction = "strafing left" if y > 0 else "strafing right"
+            
+            if output and "success" in output:
                 return {"success": True, "message": f"Robot {direction}", "direction": direction}
+            else:
+                return {"success": False, "message": f"Move failed: {error or output}"}
+                
         except Exception as e:
             logger.error(f"Move error: {e}")
             return {"success": False, "message": f"Movement failed: {str(e)}"}
-        
-        return {"success": False, "message": "Motion proxy not available"}
     
     def stop(self) -> dict:
         """Stop robot movement"""
@@ -361,99 +430,191 @@ class NAORobotController:
             return {"success": False, "message": "Robot not connected"}
         
         try:
-            motion = self._get_proxy("ALMotion")
-            if motion:
-                motion.stopMove()
+            code = '''
+motion = ALProxy("ALMotion", robot_ip, port)
+motion.stopMove()
+print(json.dumps({"success": True}))
+'''
+            output, error = self._execute_on_robot(code)
+            if output and "success" in output:
                 return {"success": True, "message": "Robot stopped"}
+            return {"success": False, "message": f"Stop failed: {error or output}"}
         except Exception as e:
-            logger.error(f"Stop error: {e}")
             return {"success": False, "message": f"Stop failed: {str(e)}"}
-        
-        return {"success": False, "message": "Motion proxy not available"}
     
     def speak(self, text: str, language: str = "en", volume: float = 1.0) -> dict:
         """Make the robot speak"""
         if not self.connected:
             return {"success": False, "message": "Robot not connected"}
         
-        try:
-            tts = self._get_proxy("ALTextToSpeech")
-            if tts:
-                # Set language if specified
-                if language:
-                    try:
-                        tts.setLanguage(language.capitalize())
-                    except:
-                        pass
-                
-                # Set volume
-                try:
-                    audio = self._get_proxy("ALAudioDevice")
-                    if audio:
-                        audio.setOutputVolume(int(volume * 100))
-                except:
-                    pass
-                
-                # Speak the text
-                tts.say(text)
-                return {"success": True, "message": f"Speaking: {text}"}
-        except Exception as e:
-            logger.error(f"Speech error: {e}")
-            return {"success": False, "message": f"Speech failed: {str(e)}"}
+        # Escape quotes in text
+        text = text.replace('"', '\\"').replace("'", "\\'")
         
-        return {"success": False, "message": "TTS proxy not available"}
+        try:
+            code = f'''
+tts = ALProxy("ALTextToSpeech", robot_ip, port)
+audio = ALProxy("ALAudioDevice", robot_ip, port)
+audio.setOutputVolume({int(volume * 100)})
+tts.say("{text}")
+print(json.dumps({{"success": True}}))
+'''
+            output, error = self._execute_on_robot(code, timeout=30)
+            if output and "success" in output:
+                return {"success": True, "message": f"Speaking: {text}"}
+            return {"success": False, "message": f"Speech failed: {error or output}"}
+        except Exception as e:
+            return {"success": False, "message": f"Speech failed: {str(e)}"}
     
     def execute_gesture(self, gesture_name: str, speed: float = 1.0) -> dict:
         """Execute a gesture/behavior"""
         if not self.connected:
             return {"success": False, "message": "Robot not connected"}
         
-        # Map gesture names to NAOqi behavior paths
-        gesture_map = {
-            "wave": "animations/Stand/Gestures/Hey_1",
-            "sit": "animations/Stand/Emotions/Positive/Excited_1",
-            "stand": "animations/Stand/Gestures/Enthusiastic_4",
-            "bow": "animations/Stand/Gestures/BowShort_1",
-            "dance": "animations/Stand/Gestures/Excited_1",
-            "handshake": "animations/Stand/Gestures/Give_1",
-            "yes": "animations/Stand/Gestures/Yes_1",
-            "no": "animations/Stand/Gestures/No_1",
-            "think": "animations/Stand/Gestures/Thinking_1",
-            "celebrate": "animations/Stand/Gestures/Winner_1"
-        }
-        
-        behavior_path = gesture_map.get(gesture_name.lower())
-        if not behavior_path:
-            return {"success": False, "message": f"Unknown gesture: {gesture_name}"}
+        gesture_name_lower = gesture_name.lower()
         
         try:
-            # First try posture for sit/stand
-            if gesture_name.lower() == "sit":
-                posture = self._get_proxy("ALRobotPosture")
-                if posture:
-                    posture.goToPosture("Sit", speed)
-                    return {"success": True, "message": "Sitting down", "gesture": gesture_name}
+            if gesture_name_lower == "sit":
+                code = f'''
+posture = ALProxy("ALRobotPosture", robot_ip, port)
+posture.goToPosture("Sit", {speed})
+print(json.dumps({{"success": True, "gesture": "sit"}}))
+'''
+            elif gesture_name_lower == "stand":
+                code = f'''
+posture = ALProxy("ALRobotPosture", robot_ip, port)
+posture.goToPosture("Stand", {speed})
+print(json.dumps({{"success": True, "gesture": "stand"}}))
+'''
+            elif gesture_name_lower == "wave":
+                code = '''
+behavior = ALProxy("ALBehaviorManager", robot_ip, port)
+if behavior.isBehaviorInstalled("animations/Stand/Gestures/Hey_1"):
+    behavior.runBehavior("animations/Stand/Gestures/Hey_1")
+else:
+    # Fallback: manual wave
+    motion = ALProxy("ALMotion", robot_ip, port)
+    motion.wakeUp()
+    names = ["RShoulderPitch", "RShoulderRoll", "RElbowYaw", "RElbowRoll", "RWristYaw"]
+    angles = [-0.5, -0.3, 1.0, 0.5, 0.0]
+    times = [1.0, 1.0, 1.0, 1.0, 1.0]
+    motion.angleInterpolation(names, angles, times, True)
+    import time
+    time.sleep(0.5)
+    # Wave motion
+    for i in range(3):
+        motion.setAngles("RWristYaw", 1.0, 0.3)
+        time.sleep(0.3)
+        motion.setAngles("RWristYaw", -1.0, 0.3)
+        time.sleep(0.3)
+    # Return to rest
+    motion.setAngles(names, [1.5, 0.1, 1.2, 0.5, 0.0], 0.2)
+print(json.dumps({"success": True, "gesture": "wave"}))
+'''
+            elif gesture_name_lower == "dance":
+                code = '''
+behavior = ALProxy("ALBehaviorManager", robot_ip, port)
+behaviors = behavior.getInstalledBehaviors()
+dance_behaviors = [b for b in behaviors if "dance" in b.lower()]
+if dance_behaviors:
+    behavior.runBehavior(dance_behaviors[0])
+elif behavior.isBehaviorInstalled("animations/Stand/Gestures/Excited_1"):
+    behavior.runBehavior("animations/Stand/Gestures/Excited_1")
+else:
+    tts = ALProxy("ALTextToSpeech", robot_ip, port)
+    tts.say("Dancing!")
+print(json.dumps({"success": True, "gesture": "dance"}))
+'''
+            elif gesture_name_lower == "bow":
+                code = '''
+behavior = ALProxy("ALBehaviorManager", robot_ip, port)
+if behavior.isBehaviorInstalled("animations/Stand/Gestures/BowShort_1"):
+    behavior.runBehavior("animations/Stand/Gestures/BowShort_1")
+else:
+    motion = ALProxy("ALMotion", robot_ip, port)
+    motion.wakeUp()
+    motion.setAngles("HeadPitch", 0.5, 0.2)
+    import time
+    time.sleep(1)
+    motion.setAngles("HeadPitch", 0.0, 0.2)
+print(json.dumps({"success": True, "gesture": "bow"}))
+'''
+            elif gesture_name_lower == "yes":
+                code = '''
+motion = ALProxy("ALMotion", robot_ip, port)
+motion.wakeUp()
+import time
+for i in range(3):
+    motion.setAngles("HeadPitch", 0.3, 0.3)
+    time.sleep(0.3)
+    motion.setAngles("HeadPitch", -0.1, 0.3)
+    time.sleep(0.3)
+motion.setAngles("HeadPitch", 0.0, 0.2)
+print(json.dumps({"success": True, "gesture": "yes"}))
+'''
+            elif gesture_name_lower == "no":
+                code = '''
+motion = ALProxy("ALMotion", robot_ip, port)
+motion.wakeUp()
+import time
+for i in range(3):
+    motion.setAngles("HeadYaw", 0.5, 0.3)
+    time.sleep(0.3)
+    motion.setAngles("HeadYaw", -0.5, 0.3)
+    time.sleep(0.3)
+motion.setAngles("HeadYaw", 0.0, 0.2)
+print(json.dumps({"success": True, "gesture": "no"}))
+'''
+            elif gesture_name_lower == "think":
+                code = '''
+motion = ALProxy("ALMotion", robot_ip, port)
+motion.wakeUp()
+# Put hand on chin thinking pose
+motion.setAngles(["RShoulderPitch", "RShoulderRoll", "RElbowYaw", "RElbowRoll"], 
+                 [0.5, -0.2, 0.0, 1.5], 0.2)
+motion.setAngles("HeadPitch", 0.2, 0.2)
+import time
+time.sleep(2)
+motion.setAngles(["RShoulderPitch", "RShoulderRoll", "RElbowYaw", "RElbowRoll"], 
+                 [1.5, 0.1, 1.2, 0.5], 0.2)
+motion.setAngles("HeadPitch", 0.0, 0.2)
+print(json.dumps({"success": True, "gesture": "think"}))
+'''
+            elif gesture_name_lower == "handshake":
+                code = '''
+motion = ALProxy("ALMotion", robot_ip, port)
+motion.wakeUp()
+# Extend right arm for handshake
+motion.setAngles(["RShoulderPitch", "RShoulderRoll", "RElbowYaw", "RElbowRoll", "RWristYaw"], 
+                 [0.3, -0.3, 0.5, 0.2, 0.0], 0.2)
+motion.openHand("RHand")
+print(json.dumps({"success": True, "gesture": "handshake"}))
+'''
+            elif gesture_name_lower == "celebrate":
+                code = '''
+motion = ALProxy("ALMotion", robot_ip, port)
+motion.wakeUp()
+import time
+# Raise both arms
+motion.setAngles(["LShoulderPitch", "RShoulderPitch"], [-1.0, -1.0], 0.3)
+time.sleep(0.5)
+# Wave them
+for i in range(3):
+    motion.setAngles(["LShoulderRoll", "RShoulderRoll"], [0.5, -0.5], 0.3)
+    time.sleep(0.3)
+    motion.setAngles(["LShoulderRoll", "RShoulderRoll"], [-0.5, 0.5], 0.3)
+    time.sleep(0.3)
+# Return to normal
+motion.setAngles(["LShoulderPitch", "RShoulderPitch", "LShoulderRoll", "RShoulderRoll"], 
+                 [1.5, 1.5, 0.1, -0.1], 0.2)
+print(json.dumps({"success": True, "gesture": "celebrate"}))
+'''
+            else:
+                return {"success": False, "message": f"Unknown gesture: {gesture_name}"}
             
-            elif gesture_name.lower() == "stand":
-                posture = self._get_proxy("ALRobotPosture")
-                if posture:
-                    posture.goToPosture("Stand", speed)
-                    return {"success": True, "message": "Standing up", "gesture": gesture_name}
-            
-            # Try behavior manager for other gestures
-            behavior = self._get_proxy("ALBehaviorManager")
-            if behavior:
-                if behavior.isBehaviorInstalled(behavior_path):
-                    behavior.runBehavior(behavior_path)
-                    return {"success": True, "message": f"Executing {gesture_name}", "gesture": gesture_name}
-                else:
-                    # Fallback: try animation
-                    animation = self._get_proxy("ALAnimationPlayer")
-                    if animation:
-                        animation.run(behavior_path)
-                        return {"success": True, "message": f"Playing animation {gesture_name}", "gesture": gesture_name}
-            
-            return {"success": False, "message": f"Gesture {gesture_name} not available on this robot"}
+            output, error = self._execute_on_robot(code, timeout=30)
+            if output and "success" in output:
+                return {"success": True, "message": f"Executing {gesture_name}", "gesture": gesture_name}
+            return {"success": False, "message": f"Gesture failed: {error or output}"}
             
         except Exception as e:
             logger.error(f"Gesture error: {e}")
@@ -465,35 +626,44 @@ class NAORobotController:
             return None
         
         try:
-            video = self._get_proxy("ALVideoDevice")
-            if video:
-                # Subscribe to camera
-                resolution = 1  # 320x240
-                colorspace = 11  # RGB
-                fps = 15
-                
-                subscriber_id = video.subscribeCamera("nao_controller", 0, resolution, colorspace, fps)
-                
+            # Get image from robot and encode as base64
+            code = '''
+import base64
+video = ALProxy("ALVideoDevice", robot_ip, port)
+subscriber_id = video.subscribeCamera("nao_ctrl", 0, 1, 11, 10)
+try:
+    nao_image = video.getImageRemote(subscriber_id)
+    if nao_image:
+        width = nao_image[0]
+        height = nao_image[1]
+        array = nao_image[6]
+        
+        # Create PPM format (simple, no PIL needed)
+        header = "P6\\n{} {}\\n255\\n".format(width, height)
+        ppm_data = header.encode() + bytes(bytearray(array))
+        b64 = base64.b64encode(ppm_data).decode()
+        print(json.dumps({"image": b64, "width": width, "height": height}))
+    else:
+        print(json.dumps({"error": "No image"}))
+finally:
+    video.unsubscribe(subscriber_id)
+'''
+            output, error = self._execute_on_robot(code, timeout=15)
+            
+            if output:
                 try:
-                    # Get image
-                    nao_image = video.getImageRemote(subscriber_id)
-                    
-                    if nao_image:
-                        width = nao_image[0]
-                        height = nao_image[1]
-                        array = nao_image[6]
-                        
-                        # Convert to PIL Image
+                    data = json.loads(output)
+                    if "image" in data:
+                        # Decode and convert PPM to JPEG
+                        ppm_data = base64.b64decode(data["image"])
                         from PIL import Image
-                        img = Image.frombytes("RGB", (width, height), bytes(array))
+                        img = Image.open(io.BytesIO(ppm_data))
                         
-                        # Convert to JPEG
-                        buffer = io.BytesIO()
-                        img.save(buffer, format='JPEG', quality=70)
-                        return buffer.getvalue()
-                finally:
-                    video.unsubscribe(subscriber_id)
-                    
+                        jpeg_buffer = io.BytesIO()
+                        img.save(jpeg_buffer, format='JPEG', quality=70)
+                        return jpeg_buffer.getvalue()
+                except Exception as e:
+                    logger.error(f"Error processing camera frame: {e}")
         except Exception as e:
             logger.error(f"Camera error: {e}")
         
@@ -501,7 +671,7 @@ class NAORobotController:
 
 
 # Global robot controller instance
-robot = NAORobotController()
+robot = NAORobotSSHController()
 
 # ==================== API Endpoints ====================
 
@@ -511,18 +681,17 @@ async def root():
         "message": "NAO Robot Control Bridge API",
         "version": "2.0.0",
         "status": "operational",
-        "naoqi_sdk_available": NAOQI_AVAILABLE,
-        "note": "This API requires NAOqi SDK for real robot connection"
+        "connection_method": "SSH + NAOqi",
+        "note": "Connects to NAO robot via SSH to execute NAOqi commands"
     }
 
 @api_router.get("/sdk-status")
 async def get_sdk_status():
-    """Check if NAOqi SDK is available"""
+    """Check connection method status"""
     return {
-        "sdk_available": NAOQI_AVAILABLE,
-        "qi_library": qi is not None,
-        "naoqi_library": naoqi is not None,
-        "instructions": "Install NAOqi SDK from SoftBank Robotics or run: pip install qi" if not NAOQI_AVAILABLE else None
+        "sdk_available": True,  # SSH method is always available
+        "connection_method": "SSH",
+        "description": "Uses SSH to execute NAOqi Python commands on the robot"
     }
 
 # Robot Configuration Endpoints
@@ -552,10 +721,14 @@ async def delete_robot(robot_id: str):
 @api_router.post("/robot/connect")
 async def connect_robot(connection: RobotConnection):
     """Connect to a NAO robot"""
-    result = robot.connect(connection.ip_address, connection.port)
+    result = robot.connect(
+        connection.ip_address, 
+        connection.port,
+        connection.username,
+        connection.password
+    )
     
     if result.get("success"):
-        # Update last_connected for saved robot
         await db.robots.update_one(
             {"ip_address": connection.ip_address},
             {"$set": {"last_connected": datetime.utcnow()}}
@@ -569,8 +742,7 @@ async def connect_robot(connection: RobotConnection):
     
     return {
         "success": False,
-        "message": result["message"],
-        "sdk_required": result.get("sdk_required", False)
+        "message": result["message"]
     }
 
 @api_router.post("/robot/disconnect")
@@ -588,8 +760,7 @@ async def get_robot_status():
 @api_router.post("/robot/move")
 async def move_robot(command: MoveCommand):
     """Send movement command to robot"""
-    result = robot.move(command.x, command.y, command.theta)
-    return result
+    return robot.move(command.x, command.y, command.theta)
 
 @api_router.post("/robot/stop")
 async def stop_robot():
@@ -600,15 +771,13 @@ async def stop_robot():
 @api_router.post("/robot/speak")
 async def robot_speak(command: SpeechCommand):
     """Make the robot speak"""
-    result = robot.speak(command.text, command.language, command.volume)
-    return result
+    return robot.speak(command.text, command.language, command.volume)
 
 # Gesture Endpoints
 @api_router.post("/robot/gesture")
 async def execute_gesture(command: GestureCommand):
     """Execute a gesture/animation"""
-    result = robot.execute_gesture(command.gesture_name, command.speed)
-    return result
+    return robot.execute_gesture(command.gesture_name, command.speed)
 
 @api_router.get("/robot/gestures")
 async def get_available_gestures():
@@ -661,7 +830,7 @@ async def websocket_sensors(websocket: WebSocket):
                 await websocket.send_json(sensor_data.dict())
             else:
                 await websocket.send_json({"connected": False, "message": "Robot not connected"})
-            await asyncio.sleep(0.5)  # Update every 500ms
+            await asyncio.sleep(1)  # Update every 1 second (SSH has more latency)
     except WebSocketDisconnect:
         logger.info("WebSocket disconnected")
     except Exception as e:
