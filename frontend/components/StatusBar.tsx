@@ -50,7 +50,7 @@ export function StatusBar() {
           <View style={styles.divider} />
           <View style={styles.statusItem}>
             <Ionicons name="thermometer" size={18} color={COLORS.textSecondary} />
-            <Text style={styles.statusText}>{status.temperature.toFixed(1)}°C</Text>
+            <Text style={styles.statusText}>{(status.temperature ?? 0).toFixed(1)}°C</Text>
           </View>
         </>
       )}
