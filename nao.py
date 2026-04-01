@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-NAO Robot REST API Server with Fall Detection
+NAO Robot REST API Server with Fall Detection (Laptop-based Detection)
 Run this on your laptop that's connected to the same WiFi as your NAO robot.
 
+Detection runs on LAPTOP (using OpenCV) - Light on NAO robot!
+NAO only captures camera frames, laptop does the heavy processing.
+
 Requirements:
-    pip install paramiko flask flask-cors
+    pip install paramiko flask flask-cors opencv-python numpy
 
 Usage:
     python nao.py
@@ -20,6 +23,7 @@ import socket
 import threading
 import base64
 import smtplib
+import io
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.mime.image import MIMEImage
@@ -37,8 +41,19 @@ try:
 except ImportError as e:
     print(f"Missing dependency: {e}")
     print("\nPlease install required packages:")
-    print("  pip install paramiko flask flask-cors")
+    print("  pip install paramiko flask flask-cors opencv-python numpy")
     sys.exit(1)
+
+# Try to import OpenCV for laptop-based detection
+try:
+    import cv2
+    import numpy as np
+    OPENCV_AVAILABLE = True
+    print("OpenCV loaded - Fall detection will run on laptop")
+except ImportError:
+    OPENCV_AVAILABLE = False
+    print("WARNING: OpenCV not installed. Install with: pip install opencv-python numpy")
+    print("Fall detection will use basic method.")
 
 # ==================== Configuration ====================
 NAO_IP = "172.18.16.35"  # Your NAO robot's IP address
@@ -58,6 +73,7 @@ RECEIVER_EMAIL = "sushanthsujeerkumar@gmail.com"
 HORIZONTAL_DETECTION_SECONDS = 12  # Time person must be horizontal before alert
 VERBAL_RESPONSE_WAIT_SECONDS = 10  # Time to wait for verbal response
 FINAL_ALERT_WAIT_SECONDS = 10  # Time after sound alert before email
+DETECTION_CHECK_INTERVAL = 3  # Seconds between each camera check (lighter on NAO)
 
 # ==================== Flask App ====================
 app = Flask(__name__)
@@ -73,8 +89,166 @@ class FallDetectionState:
         self.person_horizontal_since = None
         self.monitoring_thread = None
         self.stop_event = threading.Event()
+        self.last_frame = None  # Store last captured frame for debugging
 
 fall_state = FallDetectionState()
+
+
+# ==================== Laptop-Based Image Analysis ====================
+class LaptopDetector:
+    """
+    Detects horizontal person using OpenCV on LAPTOP
+    NAO only sends camera images - all processing happens here
+    """
+    
+    def __init__(self):
+        self.hog = None
+        self.face_cascade = None
+        if OPENCV_AVAILABLE:
+            # Initialize HOG person detector
+            self.hog = cv2.HOGDescriptor()
+            self.hog.setSVMDetector(cv2.HOGDescriptor_getDefaultPeopleDetector())
+            
+            # Initialize face cascade
+            cascade_path = cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
+            self.face_cascade = cv2.CascadeClassifier(cascade_path)
+            
+            # Also try profile face for sideways detection
+            self.profile_cascade = cv2.CascadeClassifier(
+                cv2.data.haarcascades + 'haarcascade_profileface.xml'
+            )
+    
+    def ppm_to_cv2(self, ppm_data):
+        """Convert PPM image data to OpenCV format"""
+        try:
+            # Decode base64
+            raw_data = base64.b64decode(ppm_data)
+            
+            # Parse PPM header
+            # Format: P6\nWIDTH\nHEIGHT\nMAXVAL\n<binary data>
+            lines = raw_data.split(b'\n', 3)
+            if len(lines) >= 4:
+                width = int(lines[1])
+                height = int(lines[2])
+                # maxval = int(lines[3])  # Usually 255
+                pixel_data = lines[3] if len(lines) > 3 else b''
+                
+                # Sometimes header is "WIDTH HEIGHT" on same line
+                if b' ' in lines[1]:
+                    parts = lines[1].split()
+                    width = int(parts[0])
+                    height = int(parts[1])
+                    pixel_data = lines[2] if len(lines) > 2 else b''
+                
+                # Convert to numpy array
+                if len(pixel_data) >= width * height * 3:
+                    img_array = np.frombuffer(pixel_data[:width*height*3], dtype=np.uint8)
+                    img_array = img_array.reshape((height, width, 3))
+                    # Convert RGB to BGR for OpenCV
+                    img_bgr = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
+                    return img_bgr
+        except Exception as e:
+            print(f"PPM conversion error: {e}")
+        return None
+    
+    def detect_horizontal_person(self, image_base64):
+        """
+        Analyze image to detect if a person is lying horizontal
+        Returns: (is_horizontal, confidence, details)
+        
+        Detection methods:
+        1. Detect person bounding box - if width > height, likely horizontal
+        2. Detect face position - if face is at unusual angle or low position
+        3. Body aspect ratio analysis
+        """
+        if not OPENCV_AVAILABLE or not image_base64:
+            return False, 0.0, "OpenCV not available"
+        
+        try:
+            # Convert image
+            img = self.ppm_to_cv2(image_base64)
+            if img is None:
+                return False, 0.0, "Failed to decode image"
+            
+            # Store for debugging
+            fall_state.last_frame = img
+            
+            # Resize for faster processing
+            scale = 0.5
+            small = cv2.resize(img, None, fx=scale, fy=scale)
+            gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+            
+            is_horizontal = False
+            confidence = 0.0
+            details = []
+            
+            # Method 1: HOG Person Detection
+            persons, weights = self.hog.detectMultiScale(
+                small, 
+                winStride=(8, 8),
+                padding=(4, 4),
+                scale=1.05
+            )
+            
+            for i, (x, y, w, h) in enumerate(persons):
+                aspect_ratio = w / h if h > 0 else 0
+                weight = weights[i] if i < len(weights) else 0
+                
+                details.append(f"Person {i+1}: aspect={aspect_ratio:.2f}, conf={weight:.2f}")
+                
+                # Normal standing person: width < height (aspect < 1)
+                # Horizontal person: width > height (aspect > 1)
+                if aspect_ratio > 1.2:  # Width significantly larger than height
+                    is_horizontal = True
+                    confidence = max(confidence, min(0.9, aspect_ratio / 2))
+                    details.append(f"HORIZONTAL: aspect ratio {aspect_ratio:.2f} > 1.2")
+                
+                # Person detected very low in frame (bottom 40%)
+                person_center_y = (y + h/2) / small.shape[0]
+                if person_center_y > 0.6 and aspect_ratio > 0.8:
+                    is_horizontal = True
+                    confidence = max(confidence, 0.7)
+                    details.append(f"LOW POSITION: y={person_center_y:.2f}")
+            
+            # Method 2: Face Detection
+            faces = self.face_cascade.detectMultiScale(gray, 1.1, 4, minSize=(20, 20))
+            profile_faces = self.profile_cascade.detectMultiScale(gray, 1.1, 4, minSize=(20, 20))
+            
+            all_faces = list(faces) + list(profile_faces)
+            
+            for (x, y, w, h) in all_faces:
+                face_center_y = (y + h/2) / small.shape[0]
+                face_aspect = w / h if h > 0 else 1
+                
+                details.append(f"Face at y={face_center_y:.2f}, aspect={face_aspect:.2f}")
+                
+                # Face in lower half of image might indicate fallen person
+                if face_center_y > 0.65:
+                    confidence = max(confidence, 0.6)
+                    details.append("Face in lower region")
+                
+                # Face aspect ratio > 1.3 might indicate sideways/horizontal head
+                if face_aspect > 1.3 or face_aspect < 0.7:
+                    confidence = max(confidence, 0.5)
+                    details.append(f"Unusual face aspect: {face_aspect:.2f}")
+            
+            # Method 3: Motion/Stillness detection could be added here
+            # (would need previous frame comparison)
+            
+            # Determine final result
+            if confidence > 0.5:
+                is_horizontal = True
+            
+            detail_str = " | ".join(details) if details else "No person detected"
+            return is_horizontal, confidence, detail_str
+            
+        except Exception as e:
+            return False, 0.0, f"Detection error: {str(e)}"
+
+
+# Global detector instance (runs on laptop)
+laptop_detector = LaptopDetector()
+
 
 # ==================== SSH Connection ====================
 class NAOController:
@@ -416,8 +590,11 @@ print(json.dumps({"success": True}))
             return {"success": True, "message": f"Executing {name}", "gesture": name}
         return {"success": False, "message": error or "Gesture failed"}
     
-    def capture_photo(self):
-        """Capture a photo from NAO's camera and return base64 encoded image"""
+    def capture_camera_frame(self):
+        """
+        Capture a single frame from NAO's camera (LIGHT operation)
+        Returns base64 encoded PPM image
+        """
         if not self.connected:
             return None, "Not connected"
         
@@ -427,38 +604,36 @@ import base64
 
 video = ALProxy("ALVideoDevice", robot_ip, port)
 
-# Subscribe to camera
-resolution = vision_definitions.kVGA  # 640x480
+# Use lower resolution for faster capture (QVGA = 320x240)
+resolution = vision_definitions.kQVGA
 colorSpace = vision_definitions.kRGBColorSpace
 fps = 5
 
-camProxy = video.subscribeCamera("fall_detector", 0, resolution, colorSpace, fps)
-import time
-time.sleep(0.5)
+# Subscribe, capture, unsubscribe quickly
+cam_id = "fall_cam_" + str(int(__import__('time').time() * 1000) % 10000)
+camProxy = video.subscribeCamera(cam_id, 0, resolution, colorSpace, fps)
 
-# Get image
+import time
+time.sleep(0.3)
+
+# Get single image
 image = video.getImageRemote(camProxy)
+video.unsubscribe(camProxy)
 
 if image:
-    # Get image data
     width = image[0]
     height = image[1]
     array = image[6]
     
-    # Convert to base64 (simple RGB to PNG conversion)
-    import struct
-    
-    # Create a simple PPM image
+    # Create PPM format
     header = "P6\\n{}\\n{}\\n255\\n".format(width, height)
     img_data = header.encode() + array
     
     encoded = base64.b64encode(img_data).decode('utf-8')
     print(json.dumps({"success": True, "image": encoded, "width": width, "height": height}))
 else:
-    print(json.dumps({"success": False, "error": "Failed to capture image"}))
-
-video.unsubscribe(camProxy)
-''', timeout=30)
+    print(json.dumps({"success": False, "error": "Failed to capture"}))
+''', timeout=15)
         
         try:
             if output:
@@ -468,70 +643,7 @@ video.unsubscribe(camProxy)
                 return None, data.get("error", "Failed to capture")
         except:
             pass
-        return None, error or "Failed to capture photo"
-    
-    def detect_person_horizontal(self):
-        """
-        Check if a person is lying horizontal using NAO's sensors.
-        Uses face detection position to estimate if person is horizontal.
-        Returns: (is_horizontal, confidence)
-        """
-        if not self.connected:
-            return False, 0
-        
-        output, error = self._execute_naoqi('''
-import time
-
-face_detection = ALProxy("ALFaceDetection", robot_ip, port)
-memory = ALProxy("ALMemory", robot_ip, port)
-
-# Enable face detection if not already
-face_detection.subscribe("FallDetector", 500, 0.0)
-time.sleep(1)
-
-# Check for face data
-face_data = memory.getData("FaceDetected")
-
-is_horizontal = False
-confidence = 0.0
-
-if face_data and len(face_data) > 0 and face_data[0]:
-    # Face detected - check position
-    # face_data[1] contains face info array
-    # If face is detected but at unusual vertical position, person might be horizontal
-    
-    # Get sonar readings to check if something is on the ground
-    sonar_left = memory.getData("Device/SubDeviceList/US/Left/Sensor/Value") or 999
-    sonar_right = memory.getData("Device/SubDeviceList/US/Right/Sensor/Value") or 999
-    
-    # If sonar detects something close (< 0.5m) and face is detected at low position
-    # This is a simplified heuristic
-    if sonar_left < 0.5 or sonar_right < 0.5:
-        # Something is close - could be fallen person
-        # Look down to check
-        motion = ALProxy("ALMotion", robot_ip, port)
-        current_pitch = motion.getAngles("HeadPitch", True)[0]
-        
-        # If we need to look down significantly to see the face
-        # the person might be on the ground
-        if current_pitch > 0.3:  # Looking down
-            is_horizontal = True
-            confidence = 0.7
-    
-    if not is_horizontal:
-        confidence = 0.3  # Face detected but seems normal
-
-face_detection.unsubscribe("FallDetector")
-print(json.dumps({"is_horizontal": is_horizontal, "confidence": confidence}))
-''', timeout=15)
-        
-        try:
-            if output:
-                data = json.loads(output)
-                return data.get("is_horizontal", False), data.get("confidence", 0)
-        except:
-            pass
-        return False, 0
+        return None, error or "Failed to capture camera frame"
     
     def ask_are_you_okay(self):
         """NAO asks 'Are you okay? Please respond' """
@@ -647,7 +759,7 @@ nao = NAOController()
 
 
 # ==================== Email Functions ====================
-def send_alert_email(image_base64=None):
+def send_alert_email(image_cv2=None):
     """Send fall detection alert email with optional photo attachment"""
     global fall_state
     
@@ -667,6 +779,7 @@ NAO Robot has detected a potential fall incident.
 Details:
 - Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 - Robot IP: {nao.nao_ip}
+- Detection: Laptop-based OpenCV analysis
 - Action Taken: NAO asked "Are you okay?" - No verbal response received
 - Alert Sound: Played
 
@@ -680,12 +793,15 @@ This is an automated alert from NAO Fall Detection System.
         
         msg.attach(MIMEText(body, 'plain'))
         
-        # Attach photo if available
-        if image_base64:
+        # Attach photo if available (OpenCV format)
+        if image_cv2 is not None and OPENCV_AVAILABLE:
             try:
-                image_data = base64.b64decode(image_base64)
-                image = MIMEImage(image_data, name='fall_detection.ppm')
-                image.add_header('Content-Disposition', 'attachment', filename='fall_detection_photo.ppm')
+                # Encode as JPEG
+                _, img_encoded = cv2.imencode('.jpg', image_cv2)
+                image_data = img_encoded.tobytes()
+                
+                image = MIMEImage(image_data, name='fall_detection.jpg')
+                image.add_header('Content-Disposition', 'attachment', filename='fall_detection_photo.jpg')
                 msg.attach(image)
             except Exception as img_error:
                 print(f"Failed to attach image: {img_error}")
@@ -707,12 +823,21 @@ This is an automated alert from NAO Fall Detection System.
 
 # ==================== Fall Detection Monitoring ====================
 def fall_detection_loop():
-    """Background thread for continuous fall detection monitoring"""
-    global fall_state, nao
+    """
+    Background thread for fall detection
+    - NAO captures camera frames (light operation)
+    - Laptop analyzes images using OpenCV (heavy operation)
+    """
+    global fall_state, nao, laptop_detector
     
-    print("Fall detection monitoring started")
+    print("=" * 50)
+    print("Fall detection started (Laptop-based detection)")
+    print("NAO: Camera capture only (light)")
+    print("Laptop: OpenCV analysis (heavy processing)")
+    print("=" * 50)
+    
     fall_state.status = "monitoring"
-    fall_state.message = "Monitoring for fallen persons..."
+    fall_state.message = "Monitoring... (detection on laptop)"
     
     horizontal_start_time = None
     
@@ -724,83 +849,93 @@ def fall_detection_loop():
                 time.sleep(2)
                 continue
             
-            # Check if person is horizontal
-            is_horizontal, confidence = nao.detect_person_horizontal()
+            # Step 1: Capture frame from NAO (LIGHT on robot)
+            print("Capturing frame from NAO camera...")
+            image_base64, error = nao.capture_camera_frame()
+            
+            if not image_base64:
+                print(f"Camera capture failed: {error}")
+                time.sleep(DETECTION_CHECK_INTERVAL)
+                continue
+            
+            # Step 2: Analyze on LAPTOP using OpenCV (HEAVY on laptop, not robot!)
+            print("Analyzing image on laptop...")
+            is_horizontal, confidence, details = laptop_detector.detect_horizontal_person(image_base64)
+            
+            print(f"Detection result: horizontal={is_horizontal}, confidence={confidence:.2f}")
+            print(f"Details: {details}")
             
             if is_horizontal and confidence > 0.5:
                 if horizontal_start_time is None:
                     horizontal_start_time = time.time()
                     fall_state.status = "person_detected"
-                    fall_state.message = "Person detected in horizontal position..."
+                    fall_state.message = f"Person may be horizontal (conf: {confidence:.0%})"
                     fall_state.person_horizontal_since = horizontal_start_time
-                    print("Person detected horizontal - starting timer")
+                    print(">>> Person detected horizontal - starting timer")
                 
                 # Check if horizontal for too long
                 elapsed = time.time() - horizontal_start_time
+                fall_state.message = f"Person horizontal for {elapsed:.0f}s (threshold: {HORIZONTAL_DETECTION_SECONDS}s)"
                 
                 if elapsed >= HORIZONTAL_DETECTION_SECONDS:
-                    print(f"Person horizontal for {elapsed:.1f} seconds - initiating alert sequence")
+                    print(f">>> Person horizontal for {elapsed:.1f}s - initiating alert!")
                     fall_state.status = "checking"
-                    fall_state.message = "Person horizontal too long - checking on them..."
+                    fall_state.message = "Checking on person..."
                     
-                    # Step 1: Move closer
+                    # Step 3: Move closer
                     nao.move_closer()
                     time.sleep(1)
                     
-                    # Step 2: Ask "Are you okay?"
+                    # Step 4: Ask "Are you okay?"
                     nao.ask_are_you_okay()
-                    fall_state.message = "Asked 'Are you okay?' - waiting for response..."
+                    fall_state.message = "Asked 'Are you okay?' - listening..."
                     
-                    # Step 3: Listen for verbal response
+                    # Step 5: Listen for verbal response
                     got_response, response_text = nao.listen_for_response(VERBAL_RESPONSE_WAIT_SECONDS)
                     
                     if got_response:
-                        print(f"Got response: {response_text}")
+                        print(f">>> Got response: {response_text}")
                         fall_state.status = "monitoring"
-                        fall_state.message = f"Person responded: '{response_text}' - resuming monitoring"
-                        nao.speak("Okay, I'm glad you're alright. Let me know if you need help.")
+                        fall_state.message = f"Person responded: '{response_text}'"
+                        nao.speak("Okay, I'm glad you're alright.")
                         horizontal_start_time = None
                     else:
-                        print("No verbal response - playing alert sound")
-                        fall_state.message = "No response - playing alert sound..."
+                        print(">>> No response - playing alert!")
+                        fall_state.message = "No response - alerting..."
                         
-                        # Step 4: Play loud alert sound
+                        # Step 6: Play loud alert sound
                         nao.play_alert_sound()
                         
-                        # Wait a bit more
                         time.sleep(FINAL_ALERT_WAIT_SECONDS)
                         
-                        # Step 5: Send email with photo
-                        print("Sending alert email...")
-                        fall_state.message = "Sending alert email to caretaker..."
+                        # Step 7: Send email with photo
+                        print(">>> Sending alert email...")
+                        fall_state.message = "Sending email alert..."
                         
-                        # Capture photo
-                        photo, _ = nao.capture_photo()
-                        
-                        # Send email
-                        if send_alert_email(photo):
+                        # Use the last analyzed frame
+                        if send_alert_email(fall_state.last_frame):
                             fall_state.status = "alert_sent"
-                            fall_state.message = f"Alert email sent to {RECEIVER_EMAIL}"
+                            fall_state.message = f"Alert sent to {RECEIVER_EMAIL}"
                             nao.speak("I have sent an alert email to your caretaker.")
                         else:
-                            fall_state.message = "Failed to send email, but alert was raised"
+                            fall_state.message = "Email failed, but alert was raised"
                         
-                        # Reset after alert
                         horizontal_start_time = None
-                        time.sleep(30)  # Wait before next detection cycle
+                        time.sleep(30)  # Cool down
                         fall_state.status = "monitoring"
                         fall_state.message = "Resuming monitoring..."
             else:
-                # Person not horizontal - reset timer
+                # Person not horizontal
                 if horizontal_start_time is not None:
-                    print("Person no longer horizontal - resetting timer")
+                    print(">>> Person no longer horizontal - reset")
                     horizontal_start_time = None
                     fall_state.person_horizontal_since = None
-                    fall_state.status = "monitoring"
-                    fall_state.message = "Monitoring for fallen persons..."
+                
+                fall_state.status = "monitoring"
+                fall_state.message = f"Monitoring... (last check: {details[:50]})"
             
-            # Check every 2 seconds
-            time.sleep(2)
+            # Wait before next check
+            time.sleep(DETECTION_CHECK_INTERVAL)
             
         except Exception as e:
             print(f"Fall detection error: {e}")
@@ -808,7 +943,7 @@ def fall_detection_loop():
             fall_state.message = f"Error: {str(e)}"
             time.sleep(5)
     
-    print("Fall detection monitoring stopped")
+    print("Fall detection stopped")
     fall_state.status = "idle"
     fall_state.message = "Fall detection stopped"
 
@@ -820,9 +955,10 @@ def fall_detection_loop():
 def api_root():
     return jsonify({
         "message": "NAO Robot REST API Server",
-        "version": "2.0.0",
+        "version": "2.1.0",
         "nao_ip": NAO_IP,
-        "features": ["movement", "speech", "gestures", "sensors", "fall_detection"]
+        "features": ["movement", "speech", "gestures", "sensors", "fall_detection"],
+        "fall_detection_mode": "laptop-based (OpenCV)" if OPENCV_AVAILABLE else "basic"
     })
 
 @app.route('/api/robot/connect', methods=['POST'])
@@ -906,7 +1042,7 @@ def gestures():
 
 @app.route('/api/robot/camera/frame', methods=['GET'])
 def camera_frame():
-    photo, error = nao.capture_photo()
+    photo, error = nao.capture_camera_frame()
     if photo:
         return jsonify({"success": True, "frame": photo})
     return jsonify({"success": False, "error": error or "Camera not available"}), 501
@@ -921,6 +1057,12 @@ def start_fall_detection():
     if not nao.connected:
         return jsonify({"success": False, "message": "Robot not connected"})
     
+    if not OPENCV_AVAILABLE:
+        return jsonify({
+            "success": False, 
+            "message": "OpenCV not installed on laptop. Run: pip install opencv-python numpy"
+        })
+    
     if fall_state.is_active:
         return jsonify({"success": True, "message": "Fall detection already active"})
     
@@ -931,12 +1073,13 @@ def start_fall_detection():
     fall_state.monitoring_thread.start()
     
     # Announce activation
-    nao.speak("Fall detection activated. I will monitor for anyone who may have fallen.")
+    nao.speak("Fall detection activated. I will monitor using my camera.")
     
     return jsonify({
         "success": True,
-        "message": "Fall detection started",
-        "status": fall_state.status
+        "message": "Fall detection started (laptop-based analysis)",
+        "status": fall_state.status,
+        "detection_mode": "OpenCV on laptop"
     })
 
 @app.route('/api/robot/fall_detection/stop', methods=['POST'])
@@ -969,43 +1112,57 @@ def fall_detection_status():
         "status": fall_state.status,
         "message": fall_state.message,
         "last_alert": fall_state.last_alert,
-        "person_horizontal_since": fall_state.person_horizontal_since
+        "person_horizontal_since": fall_state.person_horizontal_since,
+        "opencv_available": OPENCV_AVAILABLE
     })
 
 @app.route('/api/robot/fall_detection/test', methods=['POST'])
 def test_fall_detection():
-    """Test the fall detection alert system without actual detection"""
+    """Test the fall detection alert system"""
     if not nao.connected:
         return jsonify({"success": False, "message": "Robot not connected"})
     
-    # Test speech
-    nao.speak("Testing fall detection system.")
-    time.sleep(1)
+    results = []
     
-    # Test asking
-    nao.ask_are_you_okay()
+    # Test 1: Camera capture
+    nao.speak("Testing camera.")
+    image, error = nao.capture_camera_frame()
+    if image:
+        results.append("Camera: OK")
+    else:
+        results.append(f"Camera: FAILED - {error}")
+    
+    # Test 2: OpenCV detection
+    if OPENCV_AVAILABLE and image:
+        is_h, conf, details = laptop_detector.detect_horizontal_person(image)
+        results.append(f"OpenCV: OK (detected={is_h}, conf={conf:.2f})")
+    else:
+        results.append("OpenCV: Not available")
+    
+    # Test 3: Speech
+    nao.speak("Testing speech. Are you okay?")
+    results.append("Speech: OK")
     time.sleep(2)
     
-    # Test alert sound
+    # Test 4: Alert sound
     nao.play_alert_sound()
+    results.append("Alert Sound: OK")
     time.sleep(1)
     
-    # Test email
+    # Test 5: Email
     nao.speak("Testing email alert.")
-    email_sent = send_alert_email()
-    
-    if email_sent:
-        nao.speak("Test complete. Email alert sent successfully.")
-        return jsonify({
-            "success": True,
-            "message": f"Test complete! Alert email sent to {RECEIVER_EMAIL}"
-        })
+    if send_alert_email(fall_state.last_frame):
+        results.append(f"Email: Sent to {RECEIVER_EMAIL}")
     else:
-        nao.speak("Test complete but email failed to send. Please check email settings.")
-        return jsonify({
-            "success": False,
-            "message": "Test complete but email failed. Check SMTP settings."
-        })
+        results.append("Email: FAILED")
+    
+    nao.speak("Test complete.")
+    
+    return jsonify({
+        "success": True,
+        "message": "Test complete",
+        "results": results
+    })
 
 
 # ==================== Main ====================
@@ -1025,15 +1182,25 @@ if __name__ == '__main__':
     
     print("=" * 70)
     print("  NAO Robot REST API Server with Fall Detection")
+    print("  Version 2.1 - Laptop-based Detection (Light on Robot)")
     print("=" * 70)
     print(f"\n  NAO Robot IP: {NAO_IP}")
     print(f"  Server running on: http://{local_ip}:{SERVER_PORT}")
     print(f"\n  In the mobile app, enter:")
     print(f"    IP Address: {local_ip}")
     print(f"    Port: {SERVER_PORT}")
-    print(f"\n  Fall Detection Email Alerts:")
+    print(f"\n  Fall Detection:")
+    print(f"    Mode: {'OpenCV on Laptop' if OPENCV_AVAILABLE else 'OPENCV NOT INSTALLED'}")
+    print(f"    Camera: NAO (light capture only)")
+    print(f"    Analysis: Laptop (heavy processing)")
+    print(f"\n  Email Alerts:")
     print(f"    Sender: {SENDER_EMAIL}")
     print(f"    Receiver: {RECEIVER_EMAIL}")
+    
+    if not OPENCV_AVAILABLE:
+        print("\n  ⚠️  WARNING: OpenCV not installed!")
+        print("  Run: pip install opencv-python numpy")
+    
     print("\n" + "=" * 70)
     print("  Press Ctrl+C to stop the server")
     print("=" * 70 + "\n")
