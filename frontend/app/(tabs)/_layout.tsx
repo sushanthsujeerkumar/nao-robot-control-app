@@ -63,6 +63,15 @@ export default function TabLayout() {
             ),
           }}
         />
+        <Tabs.Screen
+          name="functions"
+          options={{
+            title: 'Functions',
+            tabBarIcon: ({ color, size }) => (
+              <Ionicons name="shield-checkmark" size={size} color={color} />
+            ),
+          }}
+        />
       </Tabs>
     </View>
   );
@@ -82,7 +91,7 @@ const styles = StyleSheet.create({
     height: Platform.OS === 'ios' ? 85 : 65,
   },
   tabLabel: {
-    fontSize: 10,
+    fontSize: 9,
     fontWeight: '600',
   },
 });

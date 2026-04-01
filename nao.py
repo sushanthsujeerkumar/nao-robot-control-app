@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-NAO Robot REST API Server
+NAO Robot REST API Server with Fall Detection
 Run this on your laptop that's connected to the same WiFi as your NAO robot.
 
 Requirements:
@@ -17,6 +17,13 @@ import json
 import time
 import sys
 import socket
+import threading
+import base64
+import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from email.mime.image import MIMEImage
+from datetime import datetime
 
 # Check Python version
 if sys.version_info[0] < 3:
@@ -40,9 +47,34 @@ SSH_USERNAME = "nao"
 SSH_PASSWORD = "nao"
 SERVER_PORT = 5000
 
+# Email Configuration for Fall Detection Alerts
+SMTP_SERVER = "smtp.gmail.com"
+SMTP_PORT = 587
+SENDER_EMAIL = "coldiot34@gmail.com"
+SENDER_PASSWORD = "ldyl ufwa awox jwqu"
+RECEIVER_EMAIL = "sushanthsujeerkumar@gmail.com"
+
+# Fall Detection Configuration
+HORIZONTAL_DETECTION_SECONDS = 12  # Time person must be horizontal before alert
+VERBAL_RESPONSE_WAIT_SECONDS = 10  # Time to wait for verbal response
+FINAL_ALERT_WAIT_SECONDS = 10  # Time after sound alert before email
+
 # ==================== Flask App ====================
 app = Flask(__name__)
 CORS(app)
+
+# ==================== Fall Detection State ====================
+class FallDetectionState:
+    def __init__(self):
+        self.is_active = False
+        self.status = "idle"  # idle, monitoring, person_detected, checking, alert_sent
+        self.message = "Fall detection not active"
+        self.last_alert = None
+        self.person_horizontal_since = None
+        self.monitoring_thread = None
+        self.stop_event = threading.Event()
+
+fall_state = FallDetectionState()
 
 # ==================== SSH Connection ====================
 class NAOController:
@@ -383,10 +415,403 @@ print(json.dumps({"success": True}))
         if output and "success" in output:
             return {"success": True, "message": f"Executing {name}", "gesture": name}
         return {"success": False, "message": error or "Gesture failed"}
+    
+    def capture_photo(self):
+        """Capture a photo from NAO's camera and return base64 encoded image"""
+        if not self.connected:
+            return None, "Not connected"
+        
+        output, error = self._execute_naoqi('''
+import vision_definitions
+import base64
+
+video = ALProxy("ALVideoDevice", robot_ip, port)
+
+# Subscribe to camera
+resolution = vision_definitions.kVGA  # 640x480
+colorSpace = vision_definitions.kRGBColorSpace
+fps = 5
+
+camProxy = video.subscribeCamera("fall_detector", 0, resolution, colorSpace, fps)
+import time
+time.sleep(0.5)
+
+# Get image
+image = video.getImageRemote(camProxy)
+
+if image:
+    # Get image data
+    width = image[0]
+    height = image[1]
+    array = image[6]
+    
+    # Convert to base64 (simple RGB to PNG conversion)
+    import struct
+    
+    # Create a simple PPM image
+    header = "P6\\n{}\\n{}\\n255\\n".format(width, height)
+    img_data = header.encode() + array
+    
+    encoded = base64.b64encode(img_data).decode('utf-8')
+    print(json.dumps({"success": True, "image": encoded, "width": width, "height": height}))
+else:
+    print(json.dumps({"success": False, "error": "Failed to capture image"}))
+
+video.unsubscribe(camProxy)
+''', timeout=30)
+        
+        try:
+            if output:
+                data = json.loads(output)
+                if data.get("success"):
+                    return data.get("image"), None
+                return None, data.get("error", "Failed to capture")
+        except:
+            pass
+        return None, error or "Failed to capture photo"
+    
+    def detect_person_horizontal(self):
+        """
+        Check if a person is lying horizontal using NAO's sensors.
+        Uses face detection position to estimate if person is horizontal.
+        Returns: (is_horizontal, confidence)
+        """
+        if not self.connected:
+            return False, 0
+        
+        output, error = self._execute_naoqi('''
+import time
+
+face_detection = ALProxy("ALFaceDetection", robot_ip, port)
+memory = ALProxy("ALMemory", robot_ip, port)
+
+# Enable face detection if not already
+face_detection.subscribe("FallDetector", 500, 0.0)
+time.sleep(1)
+
+# Check for face data
+face_data = memory.getData("FaceDetected")
+
+is_horizontal = False
+confidence = 0.0
+
+if face_data and len(face_data) > 0 and face_data[0]:
+    # Face detected - check position
+    # face_data[1] contains face info array
+    # If face is detected but at unusual vertical position, person might be horizontal
+    
+    # Get sonar readings to check if something is on the ground
+    sonar_left = memory.getData("Device/SubDeviceList/US/Left/Sensor/Value") or 999
+    sonar_right = memory.getData("Device/SubDeviceList/US/Right/Sensor/Value") or 999
+    
+    # If sonar detects something close (< 0.5m) and face is detected at low position
+    # This is a simplified heuristic
+    if sonar_left < 0.5 or sonar_right < 0.5:
+        # Something is close - could be fallen person
+        # Look down to check
+        motion = ALProxy("ALMotion", robot_ip, port)
+        current_pitch = motion.getAngles("HeadPitch", True)[0]
+        
+        # If we need to look down significantly to see the face
+        # the person might be on the ground
+        if current_pitch > 0.3:  # Looking down
+            is_horizontal = True
+            confidence = 0.7
+    
+    if not is_horizontal:
+        confidence = 0.3  # Face detected but seems normal
+
+face_detection.unsubscribe("FallDetector")
+print(json.dumps({"is_horizontal": is_horizontal, "confidence": confidence}))
+''', timeout=15)
+        
+        try:
+            if output:
+                data = json.loads(output)
+                return data.get("is_horizontal", False), data.get("confidence", 0)
+        except:
+            pass
+        return False, 0
+    
+    def ask_are_you_okay(self):
+        """NAO asks 'Are you okay? Please respond' """
+        return self.speak("Are you okay? Please respond if you can hear me.")
+    
+    def listen_for_response(self, duration=10):
+        """
+        Use NAO's speech recognition to listen for any verbal response.
+        Returns: (got_response, response_text)
+        """
+        if not self.connected:
+            return False, ""
+        
+        output, error = self._execute_naoqi(f'''
+import time
+
+asr = ALProxy("ALSpeechRecognition", robot_ip, port)
+memory = ALProxy("ALMemory", robot_ip, port)
+
+# Set vocabulary - listen for any response
+vocabulary = ["yes", "no", "help", "okay", "fine", "good", "here", "hello"]
+asr.setVocabulary(vocabulary, False)
+
+# Start listening
+asr.subscribe("FallResponseListener")
+
+start_time = time.time()
+got_response = False
+response_text = ""
+
+while time.time() - start_time < {duration}:
+    word_data = memory.getData("WordRecognized")
+    if word_data and len(word_data) > 1:
+        word = word_data[0]
+        confidence = word_data[1]
+        if confidence > 0.3 and word in vocabulary:
+            got_response = True
+            response_text = word
+            break
+    time.sleep(0.5)
+
+asr.unsubscribe("FallResponseListener")
+print(json.dumps({{"got_response": got_response, "response_text": response_text}}))
+''', timeout=duration + 15)
+        
+        try:
+            if output:
+                data = json.loads(output)
+                return data.get("got_response", False), data.get("response_text", "")
+        except:
+            pass
+        return False, ""
+    
+    def play_alert_sound(self):
+        """Play a loud alert sound on NAO"""
+        if not self.connected:
+            return {"success": False, "message": "Not connected"}
+        
+        output, error = self._execute_naoqi('''
+import time
+
+audio = ALProxy("ALAudioPlayer", robot_ip, port)
+tts = ALProxy("ALTextToSpeech", robot_ip, port)
+
+# Increase volume
+audio.setMasterVolume(1.0)
+
+# Play alert sound or use TTS with loud voice
+tts.setVolume(1.0)
+tts.say("Alert! Alert! Emergency! Someone may have fallen!")
+
+# Beep pattern
+for i in range(3):
+    tts.say("Beep")
+    time.sleep(0.3)
+
+print(json.dumps({"success": True}))
+''', timeout=30)
+        
+        if output and "success" in output:
+            return {"success": True, "message": "Alert sound played"}
+        return {"success": False, "message": error or "Failed to play alert"}
+    
+    def move_closer(self):
+        """Move NAO closer to the detected person"""
+        if not self.connected:
+            return {"success": False, "message": "Not connected"}
+        
+        output, error = self._execute_naoqi('''
+import time
+
+motion = ALProxy("ALMotion", robot_ip, port)
+motion.wakeUp()
+
+# Move forward slowly
+motion.moveTo(0.3, 0, 0)  # Move 30cm forward
+time.sleep(2)
+motion.stopMove()
+
+# Look down to see person on ground
+motion.setAngles("HeadPitch", 0.4, 0.2)  # Look down
+
+print(json.dumps({"success": True}))
+''', timeout=20)
+        
+        if output and "success" in output:
+            return {"success": True, "message": "Moved closer"}
+        return {"success": False, "message": error or "Failed to move"}
 
 
 # Global controller
 nao = NAOController()
+
+
+# ==================== Email Functions ====================
+def send_alert_email(image_base64=None):
+    """Send fall detection alert email with optional photo attachment"""
+    global fall_state
+    
+    try:
+        # Create message
+        msg = MIMEMultipart()
+        msg['From'] = SENDER_EMAIL
+        msg['To'] = RECEIVER_EMAIL
+        msg['Subject'] = f"FALL ALERT - NAO Robot Detection - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        
+        # Email body
+        body = f"""
+FALL DETECTION ALERT
+
+NAO Robot has detected a potential fall incident.
+
+Details:
+- Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+- Robot IP: {nao.nao_ip}
+- Action Taken: NAO asked "Are you okay?" - No verbal response received
+- Alert Sound: Played
+
+IMMEDIATE ACTION REQUIRED
+
+Please check on the person immediately or contact emergency services if needed.
+
+---
+This is an automated alert from NAO Fall Detection System.
+        """
+        
+        msg.attach(MIMEText(body, 'plain'))
+        
+        # Attach photo if available
+        if image_base64:
+            try:
+                image_data = base64.b64decode(image_base64)
+                image = MIMEImage(image_data, name='fall_detection.ppm')
+                image.add_header('Content-Disposition', 'attachment', filename='fall_detection_photo.ppm')
+                msg.attach(image)
+            except Exception as img_error:
+                print(f"Failed to attach image: {img_error}")
+        
+        # Send email
+        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
+            server.starttls()
+            server.login(SENDER_EMAIL, SENDER_PASSWORD)
+            server.send_message(msg)
+        
+        fall_state.last_alert = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        print(f"Alert email sent to {RECEIVER_EMAIL}")
+        return True
+        
+    except Exception as e:
+        print(f"Failed to send email: {e}")
+        return False
+
+
+# ==================== Fall Detection Monitoring ====================
+def fall_detection_loop():
+    """Background thread for continuous fall detection monitoring"""
+    global fall_state, nao
+    
+    print("Fall detection monitoring started")
+    fall_state.status = "monitoring"
+    fall_state.message = "Monitoring for fallen persons..."
+    
+    horizontal_start_time = None
+    
+    while not fall_state.stop_event.is_set():
+        try:
+            if not nao.connected:
+                fall_state.status = "error"
+                fall_state.message = "Robot disconnected"
+                time.sleep(2)
+                continue
+            
+            # Check if person is horizontal
+            is_horizontal, confidence = nao.detect_person_horizontal()
+            
+            if is_horizontal and confidence > 0.5:
+                if horizontal_start_time is None:
+                    horizontal_start_time = time.time()
+                    fall_state.status = "person_detected"
+                    fall_state.message = "Person detected in horizontal position..."
+                    fall_state.person_horizontal_since = horizontal_start_time
+                    print("Person detected horizontal - starting timer")
+                
+                # Check if horizontal for too long
+                elapsed = time.time() - horizontal_start_time
+                
+                if elapsed >= HORIZONTAL_DETECTION_SECONDS:
+                    print(f"Person horizontal for {elapsed:.1f} seconds - initiating alert sequence")
+                    fall_state.status = "checking"
+                    fall_state.message = "Person horizontal too long - checking on them..."
+                    
+                    # Step 1: Move closer
+                    nao.move_closer()
+                    time.sleep(1)
+                    
+                    # Step 2: Ask "Are you okay?"
+                    nao.ask_are_you_okay()
+                    fall_state.message = "Asked 'Are you okay?' - waiting for response..."
+                    
+                    # Step 3: Listen for verbal response
+                    got_response, response_text = nao.listen_for_response(VERBAL_RESPONSE_WAIT_SECONDS)
+                    
+                    if got_response:
+                        print(f"Got response: {response_text}")
+                        fall_state.status = "monitoring"
+                        fall_state.message = f"Person responded: '{response_text}' - resuming monitoring"
+                        nao.speak("Okay, I'm glad you're alright. Let me know if you need help.")
+                        horizontal_start_time = None
+                    else:
+                        print("No verbal response - playing alert sound")
+                        fall_state.message = "No response - playing alert sound..."
+                        
+                        # Step 4: Play loud alert sound
+                        nao.play_alert_sound()
+                        
+                        # Wait a bit more
+                        time.sleep(FINAL_ALERT_WAIT_SECONDS)
+                        
+                        # Step 5: Send email with photo
+                        print("Sending alert email...")
+                        fall_state.message = "Sending alert email to caretaker..."
+                        
+                        # Capture photo
+                        photo, _ = nao.capture_photo()
+                        
+                        # Send email
+                        if send_alert_email(photo):
+                            fall_state.status = "alert_sent"
+                            fall_state.message = f"Alert email sent to {RECEIVER_EMAIL}"
+                            nao.speak("I have sent an alert email to your caretaker.")
+                        else:
+                            fall_state.message = "Failed to send email, but alert was raised"
+                        
+                        # Reset after alert
+                        horizontal_start_time = None
+                        time.sleep(30)  # Wait before next detection cycle
+                        fall_state.status = "monitoring"
+                        fall_state.message = "Resuming monitoring..."
+            else:
+                # Person not horizontal - reset timer
+                if horizontal_start_time is not None:
+                    print("Person no longer horizontal - resetting timer")
+                    horizontal_start_time = None
+                    fall_state.person_horizontal_since = None
+                    fall_state.status = "monitoring"
+                    fall_state.message = "Monitoring for fallen persons..."
+            
+            # Check every 2 seconds
+            time.sleep(2)
+            
+        except Exception as e:
+            print(f"Fall detection error: {e}")
+            fall_state.status = "error"
+            fall_state.message = f"Error: {str(e)}"
+            time.sleep(5)
+    
+    print("Fall detection monitoring stopped")
+    fall_state.status = "idle"
+    fall_state.message = "Fall detection stopped"
+
 
 # ==================== API Routes ====================
 
@@ -395,8 +820,9 @@ nao = NAOController()
 def api_root():
     return jsonify({
         "message": "NAO Robot REST API Server",
-        "version": "1.0.0",
-        "nao_ip": NAO_IP
+        "version": "2.0.0",
+        "nao_ip": NAO_IP,
+        "features": ["movement", "speech", "gestures", "sensors", "fall_detection"]
     })
 
 @app.route('/api/robot/connect', methods=['POST'])
@@ -418,6 +844,13 @@ def connect():
 
 @app.route('/api/robot/disconnect', methods=['POST'])
 def disconnect():
+    # Stop fall detection if running
+    if fall_state.is_active:
+        fall_state.stop_event.set()
+        if fall_state.monitoring_thread:
+            fall_state.monitoring_thread.join(timeout=5)
+        fall_state.is_active = False
+    
     nao.disconnect()
     return jsonify({"success": True, "message": "Disconnected"})
 
@@ -473,7 +906,106 @@ def gestures():
 
 @app.route('/api/robot/camera/frame', methods=['GET'])
 def camera_frame():
-    return jsonify({"error": "Camera not available in this version"}), 501
+    photo, error = nao.capture_photo()
+    if photo:
+        return jsonify({"success": True, "frame": photo})
+    return jsonify({"success": False, "error": error or "Camera not available"}), 501
+
+
+# ==================== Fall Detection API Routes ====================
+
+@app.route('/api/robot/fall_detection/start', methods=['POST'])
+def start_fall_detection():
+    global fall_state
+    
+    if not nao.connected:
+        return jsonify({"success": False, "message": "Robot not connected"})
+    
+    if fall_state.is_active:
+        return jsonify({"success": True, "message": "Fall detection already active"})
+    
+    # Start monitoring thread
+    fall_state.stop_event.clear()
+    fall_state.is_active = True
+    fall_state.monitoring_thread = threading.Thread(target=fall_detection_loop, daemon=True)
+    fall_state.monitoring_thread.start()
+    
+    # Announce activation
+    nao.speak("Fall detection activated. I will monitor for anyone who may have fallen.")
+    
+    return jsonify({
+        "success": True,
+        "message": "Fall detection started",
+        "status": fall_state.status
+    })
+
+@app.route('/api/robot/fall_detection/stop', methods=['POST'])
+def stop_fall_detection():
+    global fall_state
+    
+    if not fall_state.is_active:
+        return jsonify({"success": True, "message": "Fall detection already stopped"})
+    
+    fall_state.stop_event.set()
+    if fall_state.monitoring_thread:
+        fall_state.monitoring_thread.join(timeout=5)
+    
+    fall_state.is_active = False
+    fall_state.status = "idle"
+    fall_state.message = "Fall detection stopped"
+    
+    if nao.connected:
+        nao.speak("Fall detection deactivated.")
+    
+    return jsonify({
+        "success": True,
+        "message": "Fall detection stopped"
+    })
+
+@app.route('/api/robot/fall_detection/status', methods=['GET'])
+def fall_detection_status():
+    return jsonify({
+        "active": fall_state.is_active,
+        "status": fall_state.status,
+        "message": fall_state.message,
+        "last_alert": fall_state.last_alert,
+        "person_horizontal_since": fall_state.person_horizontal_since
+    })
+
+@app.route('/api/robot/fall_detection/test', methods=['POST'])
+def test_fall_detection():
+    """Test the fall detection alert system without actual detection"""
+    if not nao.connected:
+        return jsonify({"success": False, "message": "Robot not connected"})
+    
+    # Test speech
+    nao.speak("Testing fall detection system.")
+    time.sleep(1)
+    
+    # Test asking
+    nao.ask_are_you_okay()
+    time.sleep(2)
+    
+    # Test alert sound
+    nao.play_alert_sound()
+    time.sleep(1)
+    
+    # Test email
+    nao.speak("Testing email alert.")
+    email_sent = send_alert_email()
+    
+    if email_sent:
+        nao.speak("Test complete. Email alert sent successfully.")
+        return jsonify({
+            "success": True,
+            "message": f"Test complete! Alert email sent to {RECEIVER_EMAIL}"
+        })
+    else:
+        nao.speak("Test complete but email failed to send. Please check email settings.")
+        return jsonify({
+            "success": False,
+            "message": "Test complete but email failed. Check SMTP settings."
+        })
 
 
 # ==================== Main ====================
@@ -491,17 +1023,20 @@ def get_local_ip():
 if __name__ == '__main__':
     local_ip = get_local_ip()
     
-    print("=" * 60)
-    print("  NAO Robot REST API Server")
-    print("=" * 60)
+    print("=" * 70)
+    print("  NAO Robot REST API Server with Fall Detection")
+    print("=" * 70)
     print(f"\n  NAO Robot IP: {NAO_IP}")
     print(f"  Server running on: http://{local_ip}:{SERVER_PORT}")
     print(f"\n  In the mobile app, enter:")
     print(f"    IP Address: {local_ip}")
     print(f"    Port: {SERVER_PORT}")
-    print("\n" + "=" * 60)
+    print(f"\n  Fall Detection Email Alerts:")
+    print(f"    Sender: {SENDER_EMAIL}")
+    print(f"    Receiver: {RECEIVER_EMAIL}")
+    print("\n" + "=" * 70)
     print("  Press Ctrl+C to stop the server")
-    print("=" * 60 + "\n")
+    print("=" * 70 + "\n")
     
     print("Connecting to NAO automatically...")
     result = nao.connect(NAO_IP)
