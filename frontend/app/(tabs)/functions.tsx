@@ -15,33 +15,16 @@ import { useRobotStore } from '../../store/robotStore';
 import { Card } from '../../components/Card';
 import axios from 'axios';
 
-type FallDetectionStatus = 'idle' | 'monitoring' | 'person_detected' | 'checking' | 'alert_sent' | 'error';
-type ExerciseStatus = 'idle' | 'greeting' | 'readiness' | 'squat' | 'continue_check' | 'arm_stretch' | 'cooldown' | 'feedback' | 'session_end' | 'error';
-
-interface FallDetectionState {
-  status: FallDetectionStatus;
-  message: string;
-  lastAlert?: string;
-}
-
-interface ExerciseState {
-  status: ExerciseStatus;
-  message: string;
-  currentExercise: string;
-  waitingForResponse: boolean;
-}
-
 export default function FunctionsScreen() {
   const { robotUrl, status } = useRobotStore();
   
-  // Fall Detection State
-  const [fallDetection, setFallDetection] = useState<FallDetectionState>({
+  const [fallDetection, setFallDetection] = useState({
     status: 'idle',
     message: 'Fall detection is not active',
+    lastAlert: null,
   });
   
-  // Exercise State
-  const [exercise, setExercise] = useState<ExerciseState>({
+  const [exercise, setExercise] = useState({
     status: 'idle',
     message: 'Exercise session not started',
     currentExercise: '',
@@ -49,12 +32,11 @@ export default function FunctionsScreen() {
   });
   
   const [isLoading, setIsLoading] = useState(false);
-  const [activeTab, setActiveTab] = useState<'fall' | 'exercise'>('fall');
-  const pollingRef = useRef<NodeJS.Timeout | null>(null);
+  const [activeTab, setActiveTab] = useState('fall');
+  const pollingRef = useRef(null);
 
   const isConnected = status?.connected && robotUrl;
 
-  // Polling for status
   useEffect(() => {
     if (activeTab === 'fall' && (fallDetection.status === 'monitoring' || fallDetection.status === 'person_detected' || fallDetection.status === 'checking')) {
       pollingRef.current = setInterval(async () => {
@@ -93,7 +75,6 @@ export default function FunctionsScreen() {
     };
   }, [fallDetection.status, exercise.status, activeTab, robotUrl]);
 
-  // ==================== FALL DETECTION ====================
   const startFallDetection = async () => {
     if (!robotUrl) {
       Alert.alert('Not Connected', 'Please connect to NAO robot first.');
@@ -103,11 +84,11 @@ export default function FunctionsScreen() {
     try {
       const response = await axios.post(`${robotUrl}/api/robot/fall_detection/start`, {}, { timeout: 10000 });
       if (response.data.success) {
-        setFallDetection({ status: 'monitoring', message: 'Monitoring for fallen persons...' });
+        setFallDetection({ status: 'monitoring', message: 'Monitoring for fallen persons...', lastAlert: null });
       } else {
         Alert.alert('Error', response.data.message || 'Failed to start');
       }
-    } catch (error: any) {
+    } catch (error) {
       Alert.alert('Error', error.message || 'Failed to start fall detection');
     } finally {
       setIsLoading(false);
@@ -119,7 +100,7 @@ export default function FunctionsScreen() {
     try {
       await axios.post(`${robotUrl}/api/robot/fall_detection/stop`, {}, { timeout: 10000 });
     } catch (error) {}
-    setFallDetection({ status: 'idle', message: 'Fall detection stopped' });
+    setFallDetection({ status: 'idle', message: 'Fall detection stopped', lastAlert: null });
     setIsLoading(false);
   };
 
@@ -132,14 +113,13 @@ export default function FunctionsScreen() {
     try {
       const response = await axios.post(`${robotUrl}/api/robot/fall_detection/test`, {}, { timeout: 60000 });
       Alert.alert('Test Complete', response.data.results?.join('\n') || 'Test finished');
-    } catch (error: any) {
+    } catch (error) {
       Alert.alert('Error', error.message);
     } finally {
       setIsLoading(false);
     }
   };
 
-  // ==================== EXERCISE ====================
   const startExercise = async () => {
     if (!robotUrl) {
       Alert.alert('Not Connected', 'Please connect to NAO robot first.');
@@ -158,7 +138,7 @@ export default function FunctionsScreen() {
       } else {
         Alert.alert('Error', response.data.message || 'Failed to start');
       }
-    } catch (error: any) {
+    } catch (error) {
       Alert.alert('Error', error.message || 'Failed to start exercise');
     } finally {
       setIsLoading(false);
@@ -179,12 +159,12 @@ export default function FunctionsScreen() {
     setIsLoading(false);
   };
 
-  const sendExerciseResponse = async (response: string) => {
+  const sendExerciseResponse = async (response) => {
     if (!robotUrl) return;
     setIsLoading(true);
     try {
       await axios.post(`${robotUrl}/api/robot/exercise/respond`, { response }, { timeout: 10000 });
-    } catch (error: any) {
+    } catch (error) {
       Alert.alert('Error', error.message);
     } finally {
       setIsLoading(false);
@@ -226,13 +206,11 @@ export default function FunctionsScreen() {
   return (
     <SafeAreaView style={styles.container} edges={['left', 'right']}>
       <ScrollView style={styles.scrollView} contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
-        {/* Header */}
         <View style={styles.header}>
           <Ionicons name="shield-checkmark" size={32} color={COLORS.primary} />
           <Text style={styles.headerTitle}>Safety Functions</Text>
         </View>
 
-        {/* Connection Warning */}
         {!isConnected && (
           <Card style={styles.warningCard}>
             <View style={styles.warningContent}>
@@ -242,7 +220,6 @@ export default function FunctionsScreen() {
           </Card>
         )}
 
-        {/* Tab Selector */}
         <View style={styles.tabContainer}>
           <TouchableOpacity
             style={[styles.tab, activeTab === 'fall' && styles.tabActive]}
@@ -260,7 +237,6 @@ export default function FunctionsScreen() {
           </TouchableOpacity>
         </View>
 
-        {/* ==================== FALL DETECTION TAB ==================== */}
         {activeTab === 'fall' && (
           <>
             <Card style={styles.card}>
@@ -281,14 +257,12 @@ export default function FunctionsScreen() {
                 Monitors for persons lying horizontal. If detected, NAO will check on them and send alerts.
               </Text>
 
-              {/* Status Display */}
               <View style={[styles.statusDisplay, { borderColor: getFallStatusColor() }]}>
                 <Ionicons name={fallDetection.status === 'monitoring' ? 'eye' : 'shield-outline'} size={40} color={getFallStatusColor()} />
                 <Text style={styles.statusMessage}>{fallDetection.message}</Text>
                 {fallDetection.lastAlert && <Text style={styles.lastAlert}>Last alert: {fallDetection.lastAlert}</Text>}
               </View>
 
-              {/* Control Buttons */}
               <View style={styles.buttonRow}>
                 {!isFallActive ? (
                   <TouchableOpacity style={[styles.primaryButton, !isConnected && styles.buttonDisabled]} onPress={startFallDetection} disabled={!isConnected || isLoading}>
@@ -327,7 +301,6 @@ export default function FunctionsScreen() {
           </>
         )}
 
-        {/* ==================== EXERCISE TAB ==================== */}
         {activeTab === 'exercise' && (
           <>
             <Card style={styles.card}>
@@ -348,7 +321,6 @@ export default function FunctionsScreen() {
                 Guided exercise session with NAO. Includes squats, arm stretches, and cooldown breathing.
               </Text>
 
-              {/* Exercise Steps */}
               <View style={styles.stepsList}>
                 <View style={styles.stepItem}>
                   <View style={[styles.stepNumber, exercise.status === 'squat' && styles.stepActive]}>
@@ -366,11 +338,10 @@ export default function FunctionsScreen() {
                   <View style={[styles.stepNumber, exercise.status === 'cooldown' && styles.stepActive]}>
                     <Text style={styles.stepNumberText}>3</Text>
                   </View>
-                  <Text style={styles.stepText}>Cooldown & Breathing</Text>
+                  <Text style={styles.stepText}>Cooldown and Breathing</Text>
                 </View>
               </View>
 
-              {/* Status Display */}
               <View style={[styles.statusDisplay, { borderColor: getExerciseStatusColor() }]}>
                 <Ionicons 
                   name={
@@ -383,12 +354,11 @@ export default function FunctionsScreen() {
                   color={getExerciseStatusColor()} 
                 />
                 <Text style={styles.statusMessage}>{exercise.message}</Text>
-                {exercise.currentExercise && (
+                {exercise.currentExercise ? (
                   <Text style={styles.currentExercise}>Current: {exercise.currentExercise}</Text>
-                )}
+                ) : null}
               </View>
 
-              {/* Response Buttons (when waiting) */}
               {exercise.waitingForResponse && (
                 <View style={styles.responseContainer}>
                   <Text style={styles.responsePrompt}>NAO is waiting for your response:</Text>
@@ -409,7 +379,6 @@ export default function FunctionsScreen() {
                 </View>
               )}
 
-              {/* Control Buttons */}
               <View style={styles.buttonRow}>
                 {!isExerciseActive ? (
                   <TouchableOpacity style={[styles.successButton, !isConnected && styles.buttonDisabled]} onPress={startExercise} disabled={!isConnected || isLoading}>
@@ -439,8 +408,7 @@ export default function FunctionsScreen() {
                 <Text style={styles.infoTitle}>How It Works</Text>
               </View>
               <Text style={styles.infoText}>
-                NAO guides you through gentle exercises with voice instructions and demonstrations. 
-                Respond to NAO's prompts using the buttons above or by speaking.
+                NAO guides you through gentle exercises with voice instructions. Respond using the buttons or by speaking to NAO.
               </Text>
             </Card>
           </>
