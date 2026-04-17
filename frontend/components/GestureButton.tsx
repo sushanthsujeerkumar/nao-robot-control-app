@@ -11,6 +11,29 @@ interface GestureButtonProps {
 }
 
 const ICON_MAP: { [key: string]: string } = {
+  // Gestures
+  'hand-left': 'hand-left',
+  'body': 'body',
+  'checkmark-circle': 'checkmark-circle',
+  'close-circle': 'close-circle',
+  'musical-notes': 'musical-notes',
+  'happy': 'happy',
+  'hand-right': 'hand-right',
+  'bulb': 'bulb',
+  'sad': 'sad',
+  'flame': 'flame',
+  'alert': 'alert-circle',
+  'thumbs-up': 'thumbs-up',
+  'flash': 'flash',
+  'fitness': 'fitness',
+  'arrow-up': 'arrow-up-circle',
+  'arrow-down': 'arrow-down-circle',
+  'chevron-down': 'chevron-down-circle',
+  'arrow-back': 'arrow-back-circle',
+  'arrow-forward': 'arrow-forward-circle',
+  'caret-up': 'caret-up-circle',
+  'caret-down': 'caret-down-circle',
+  // Fallbacks
   'hand-wave': 'hand-left',
   'seat': 'bed',
   'human': 'body',

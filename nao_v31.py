@@ -223,11 +223,56 @@ NAOCODE'''
         out, _ = self._execute_naoqi('''
 battery = ALProxy("ALBattery", robot_ip, port)
 posture = ALProxy("ALRobotPosture", robot_ip, port)
-print(json.dumps({"battery_level": battery.getBatteryCharge(), "posture": posture.getPostureFamily()}))
+memory = ALProxy("ALMemory", robot_ip, port)
+
+# Get real temperature readings from various joints
+temps = []
+temp_sensors = [
+    "Device/SubDeviceList/HeadPitch/Temperature/Sensor/Value",
+    "Device/SubDeviceList/HeadYaw/Temperature/Sensor/Value",
+    "Device/SubDeviceList/LShoulderPitch/Temperature/Sensor/Value",
+    "Device/SubDeviceList/RShoulderPitch/Temperature/Sensor/Value",
+    "Device/SubDeviceList/LHipPitch/Temperature/Sensor/Value",
+    "Device/SubDeviceList/RHipPitch/Temperature/Sensor/Value"
+]
+for sensor in temp_sensors:
+    try:
+        t = memory.getData(sensor)
+        if t and t > 0:
+            temps.append(float(t))
+    except:
+        pass
+
+avg_temp = sum(temps) / len(temps) if temps else 35.0
+max_temp = max(temps) if temps else 35.0
+
+# Get CPU usage estimate from system
+try:
+    cpu_temp = memory.getData("Device/SubDeviceList/Head/Temperature/Sensor/Value") or 40
+except:
+    cpu_temp = 40
+
+print(json.dumps({
+    "battery_level": battery.getBatteryCharge(),
+    "posture": posture.getPostureFamily(),
+    "avg_temperature": round(avg_temp, 1),
+    "max_temperature": round(max_temp, 1),
+    "cpu_temperature": round(float(cpu_temp), 1)
+}))
 ''')
         try:
             data = json.loads(out) if out else {}
-            return {"connected": True, "ip_address": self.nao_ip, "battery_level": data.get("battery_level", 0), "temperature": 40, "robot_name": "NAO V5", "posture": data.get("posture", "Unknown"), "uptime": int(time.time() - self.start_time) if self.start_time else 0}
+            return {
+                "connected": True,
+                "ip_address": self.nao_ip,
+                "battery_level": data.get("battery_level", 0),
+                "temperature": data.get("avg_temperature", 35),
+                "max_temperature": data.get("max_temperature", 35),
+                "cpu_temperature": data.get("cpu_temperature", 40),
+                "robot_name": "NAO V5",
+                "posture": data.get("posture", "Unknown"),
+                "uptime": int(time.time() - self.start_time) if self.start_time else 0
+            }
         except:
             return {"connected": True, "ip_address": self.nao_ip, "robot_name": "NAO V5"}
     
@@ -522,117 +567,160 @@ motion.rest()
     
     # ==================== EXERCISE DEMONSTRATIONS ====================
     def demo_squat(self):
-        """Robot demonstrates squat movement"""
+        """Robot demonstrates squat movement - safe version for NAO V5"""
         if not self.connected:
-            return
-        self._execute_naoqi('''
+            return False
+        print("Executing demo_squat...")
+        out, err = self._execute_naoqi('''
 import time
 motion = ALProxy("ALMotion", robot_ip, port)
+posture = ALProxy("ALRobotPosture", robot_ip, port)
+tts = ALProxy("ALTextToSpeech", robot_ip, port)
+
 motion.wakeUp()
+posture.goToPosture("StandInit", 0.5)
+time.sleep(0.5)
 
 # Arms forward for balance
-motion.setAngles(["LShoulderPitch", "RShoulderPitch"], [0.5, 0.5], 0.15)
-time.sleep(0.5)
+motion.setAngles(["LShoulderPitch", "RShoulderPitch"], [0.3, 0.3], 0.2)
+motion.setAngles(["LElbowRoll", "RElbowRoll"], [-0.5, 0.5], 0.2)
+time.sleep(1)
 
-# Squat down (bend knees)
-motion.setAngles(["LHipPitch", "RHipPitch"], [-0.5, -0.5], 0.1)
-motion.setAngles(["LKneePitch", "RKneePitch"], [0.8, 0.8], 0.1)
+# Squat down - crouch slightly
+motion.setAngles(["LHipYawPitch"], [-0.2], 0.1)
+motion.setAngles(["LHipPitch", "RHipPitch"], [-0.4, -0.4], 0.1)
+motion.setAngles(["LKneePitch", "RKneePitch"], [0.7, 0.7], 0.1)
 motion.setAngles(["LAnklePitch", "RAnklePitch"], [-0.3, -0.3], 0.1)
-time.sleep(1.5)
+time.sleep(2)
 
 # Stand back up
-motion.setAngles(["LHipPitch", "RHipPitch"], [0.0, 0.0], 0.1)
-motion.setAngles(["LKneePitch", "RKneePitch"], [0.0, 0.0], 0.1)
-motion.setAngles(["LAnklePitch", "RAnklePitch"], [0.0, 0.0], 0.1)
+posture.goToPosture("StandInit", 0.3)
 time.sleep(1)
 
-# Arms back down
-motion.setAngles(["LShoulderPitch", "RShoulderPitch"], [1.5, 1.5], 0.15)
+print("squat_done")
 ''', timeout=30)
+        print(f"demo_squat result: {out}, err: {err}")
+        return True
     
     def demo_arms_up(self):
-        """Robot demonstrates arms up stretch"""
+        """Robot demonstrates arms up stretch - safe version for NAO V5"""
         if not self.connected:
-            return
-        self._execute_naoqi('''
+            return False
+        print("Executing demo_arms_up...")
+        out, err = self._execute_naoqi('''
 import time
 motion = ALProxy("ALMotion", robot_ip, port)
+posture = ALProxy("ALRobotPosture", robot_ip, port)
+
 motion.wakeUp()
+posture.goToPosture("StandInit", 0.5)
+time.sleep(0.5)
 
-# Raise arms slowly up
-motion.setAngles(["LShoulderPitch", "RShoulderPitch"], [0.0, 0.0], 0.1)
-time.sleep(0.5)
-motion.setAngles(["LShoulderPitch", "RShoulderPitch"], [-0.5, -0.5], 0.1)
-time.sleep(0.5)
-motion.setAngles(["LShoulderPitch", "RShoulderPitch"], [-1.2, -1.2], 0.1)
+# Raise arms slowly to sides then up
+motion.setAngles(["LShoulderPitch", "RShoulderPitch"], [0.5, 0.5], 0.15)
+motion.setAngles(["LShoulderRoll", "RShoulderRoll"], [0.5, -0.5], 0.15)
 time.sleep(1)
 
-# Hold at top
+# Arms up high
+motion.setAngles(["LShoulderPitch", "RShoulderPitch"], [-0.8, -0.8], 0.15)
+motion.setAngles(["LElbowYaw", "RElbowYaw"], [-1.5, 1.5], 0.15)
+motion.setAngles(["LElbowRoll", "RElbowRoll"], [0.0, 0.0], 0.15)
+time.sleep(2)
+
+# Hold stretch
 time.sleep(1)
 
-# Lower arms slowly
-motion.setAngles(["LShoulderPitch", "RShoulderPitch"], [-0.5, -0.5], 0.1)
-time.sleep(0.5)
-motion.setAngles(["LShoulderPitch", "RShoulderPitch"], [0.0, 0.0], 0.1)
-time.sleep(0.5)
-motion.setAngles(["LShoulderPitch", "RShoulderPitch"], [1.5, 1.5], 0.1)
+# Lower arms back down
+motion.setAngles(["LShoulderPitch", "RShoulderPitch"], [0.5, 0.5], 0.15)
+time.sleep(1)
+
+# Return to stand
+posture.goToPosture("StandInit", 0.3)
+
+print("arms_up_done")
 ''', timeout=30)
+        print(f"demo_arms_up result: {out}, err: {err}")
+        return True
     
     def demo_side_stretch(self):
-        """Robot demonstrates side stretch"""
+        """Robot demonstrates side stretch - safe version"""
         if not self.connected:
-            return
-        self._execute_naoqi('''
+            return False
+        print("Executing demo_side_stretch...")
+        out, err = self._execute_naoqi('''
 import time
 motion = ALProxy("ALMotion", robot_ip, port)
-motion.wakeUp()
+posture = ALProxy("ALRobotPosture", robot_ip, port)
 
-# Right arm up
-motion.setAngles("RShoulderPitch", -1.5, 0.15)
-motion.setAngles("RShoulderRoll", -0.3, 0.15)
+motion.wakeUp()
+posture.goToPosture("StandInit", 0.5)
+time.sleep(0.5)
+
+# Right arm up, lean left
+motion.setAngles("RShoulderPitch", -1.0, 0.15)
+motion.setAngles("RShoulderRoll", -0.2, 0.15)
+motion.setAngles("RElbowRoll", 0.0, 0.15)
 time.sleep(1)
 
-# Lean left
-motion.setAngles("LHipRoll", 0.2, 0.1)
+# Slight lean
+motion.setAngles("HeadYaw", 0.3, 0.1)
 time.sleep(1.5)
 
 # Back to center
-motion.setAngles("LHipRoll", 0.0, 0.1)
-motion.setAngles(["RShoulderPitch", "RShoulderRoll"], [1.5, -0.1], 0.15)
+posture.goToPosture("StandInit", 0.3)
 time.sleep(0.5)
 
 # Left arm up
-motion.setAngles("LShoulderPitch", -1.5, 0.15)
-motion.setAngles("LShoulderRoll", 0.3, 0.15)
+motion.setAngles("LShoulderPitch", -1.0, 0.15)
+motion.setAngles("LShoulderRoll", 0.2, 0.15)
+motion.setAngles("LElbowRoll", 0.0, 0.15)
 time.sleep(1)
 
-# Lean right
-motion.setAngles("RHipRoll", -0.2, 0.1)
+# Slight lean other side
+motion.setAngles("HeadYaw", -0.3, 0.1)
 time.sleep(1.5)
 
-# Back to center
-motion.setAngles("RHipRoll", 0.0, 0.1)
-motion.setAngles(["LShoulderPitch", "LShoulderRoll"], [1.5, 0.1], 0.15)
+# Back to neutral
+posture.goToPosture("StandInit", 0.3)
+
+print("side_stretch_done")
 ''', timeout=40)
+        print(f"demo_side_stretch result: {out}, err: {err}")
+        return True
     
     def demo_breathing(self):
-        """Robot demonstrates breathing exercise"""
+        """Robot demonstrates breathing exercise - safe version"""
         if not self.connected:
-            return
-        self._execute_naoqi('''
+            return False
+        print("Executing demo_breathing...")
+        out, err = self._execute_naoqi('''
 import time
 motion = ALProxy("ALMotion", robot_ip, port)
-motion.wakeUp()
+posture = ALProxy("ALRobotPosture", robot_ip, port)
 
-# Breathe in - expand chest, raise arms slightly
-motion.setAngles(["LShoulderPitch", "RShoulderPitch"], [1.0, 1.0], 0.08)
-motion.setAngles(["LShoulderRoll", "RShoulderRoll"], [0.3, -0.3], 0.08)
+motion.wakeUp()
+posture.goToPosture("StandInit", 0.5)
+time.sleep(0.5)
+
+# Breathe in - chest expand, arms out slightly
+motion.setAngles(["LShoulderPitch", "RShoulderPitch"], [1.2, 1.2], 0.08)
+motion.setAngles(["LShoulderRoll", "RShoulderRoll"], [0.4, -0.4], 0.08)
+motion.setAngles("HeadPitch", -0.1, 0.08)
 time.sleep(3)
 
 # Breathe out - relax
 motion.setAngles(["LShoulderPitch", "RShoulderPitch"], [1.5, 1.5], 0.08)
-motion.setAngles(["LShoulderRoll", "RShoulderRoll"], [0.1, -0.1], 0.08)
+motion.setAngles(["LShoulderRoll", "RShoulderRoll"], [0.15, -0.15], 0.08)
+motion.setAngles("HeadPitch", 0.1, 0.08)
 time.sleep(3)
+
+# Return to neutral
+posture.goToPosture("StandInit", 0.3)
+
+print("breathing_done")
+''', timeout=30)
+        print(f"demo_breathing result: {out}, err: {err}")
+        return True
 ''', timeout=30)
     
     def capture_camera_frame(self):
