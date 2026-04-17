@@ -7,7 +7,6 @@ import {
   TouchableOpacity,
   ActivityIndicator,
   Alert,
-  Platform,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
@@ -17,28 +16,47 @@ import { Card } from '../../components/Card';
 import axios from 'axios';
 
 type FallDetectionStatus = 'idle' | 'monitoring' | 'person_detected' | 'checking' | 'alert_sent' | 'error';
+type ExerciseStatus = 'idle' | 'greeting' | 'readiness' | 'squat' | 'continue_check' | 'arm_stretch' | 'cooldown' | 'feedback' | 'session_end' | 'error';
 
 interface FallDetectionState {
   status: FallDetectionStatus;
   message: string;
   lastAlert?: string;
-  personHorizontalSince?: number;
+}
+
+interface ExerciseState {
+  status: ExerciseStatus;
+  message: string;
+  currentExercise: string;
+  waitingForResponse: boolean;
 }
 
 export default function FunctionsScreen() {
   const { robotUrl, status } = useRobotStore();
+  
+  // Fall Detection State
   const [fallDetection, setFallDetection] = useState<FallDetectionState>({
     status: 'idle',
     message: 'Fall detection is not active',
   });
+  
+  // Exercise State
+  const [exercise, setExercise] = useState<ExerciseState>({
+    status: 'idle',
+    message: 'Exercise session not started',
+    currentExercise: '',
+    waitingForResponse: false,
+  });
+  
   const [isLoading, setIsLoading] = useState(false);
+  const [activeTab, setActiveTab] = useState<'fall' | 'exercise'>('fall');
   const pollingRef = useRef<NodeJS.Timeout | null>(null);
 
   const isConnected = status?.connected && robotUrl;
 
-  // Polling for fall detection status
+  // Polling for status
   useEffect(() => {
-    if (fallDetection.status === 'monitoring' || fallDetection.status === 'person_detected' || fallDetection.status === 'checking') {
+    if (activeTab === 'fall' && (fallDetection.status === 'monitoring' || fallDetection.status === 'person_detected' || fallDetection.status === 'checking')) {
       pollingRef.current = setInterval(async () => {
         try {
           const response = await axios.get(`${robotUrl}/api/robot/fall_detection/status`, { timeout: 5000 });
@@ -47,13 +65,24 @@ export default function FunctionsScreen() {
               status: response.data.status || 'monitoring',
               message: response.data.message || 'Monitoring...',
               lastAlert: response.data.last_alert,
-              personHorizontalSince: response.data.person_horizontal_since,
             });
           }
-        } catch (error) {
-          // Silent error during polling
-        }
+        } catch (error) {}
       }, 2000);
+    } else if (activeTab === 'exercise' && exercise.status !== 'idle' && exercise.status !== 'session_end') {
+      pollingRef.current = setInterval(async () => {
+        try {
+          const response = await axios.get(`${robotUrl}/api/robot/exercise/status`, { timeout: 5000 });
+          if (response.data) {
+            setExercise({
+              status: response.data.status || 'idle',
+              message: response.data.message || '',
+              currentExercise: response.data.current_exercise || '',
+              waitingForResponse: response.data.waiting_for_response || false,
+            });
+          }
+        } catch (error) {}
+      }, 1500);
     }
 
     return () => {
@@ -62,24 +91,21 @@ export default function FunctionsScreen() {
         pollingRef.current = null;
       }
     };
-  }, [fallDetection.status, robotUrl]);
+  }, [fallDetection.status, exercise.status, activeTab, robotUrl]);
 
+  // ==================== FALL DETECTION ====================
   const startFallDetection = async () => {
     if (!robotUrl) {
       Alert.alert('Not Connected', 'Please connect to NAO robot first.');
       return;
     }
-
     setIsLoading(true);
     try {
       const response = await axios.post(`${robotUrl}/api/robot/fall_detection/start`, {}, { timeout: 10000 });
       if (response.data.success) {
-        setFallDetection({
-          status: 'monitoring',
-          message: 'Fall detection is now active. Monitoring for fallen persons...',
-        });
+        setFallDetection({ status: 'monitoring', message: 'Monitoring for fallen persons...' });
       } else {
-        Alert.alert('Error', response.data.message || 'Failed to start fall detection');
+        Alert.alert('Error', response.data.message || 'Failed to start');
       }
     } catch (error: any) {
       Alert.alert('Error', error.message || 'Failed to start fall detection');
@@ -89,74 +115,93 @@ export default function FunctionsScreen() {
   };
 
   const stopFallDetection = async () => {
-    if (!robotUrl) return;
-
     setIsLoading(true);
     try {
-      const response = await axios.post(`${robotUrl}/api/robot/fall_detection/stop`, {}, { timeout: 10000 });
-      setFallDetection({
-        status: 'idle',
-        message: 'Fall detection stopped',
-      });
-    } catch (error: any) {
-      // Still stop locally even if API fails
-      setFallDetection({
-        status: 'idle',
-        message: 'Fall detection stopped',
-      });
-    } finally {
-      setIsLoading(false);
-    }
+      await axios.post(`${robotUrl}/api/robot/fall_detection/stop`, {}, { timeout: 10000 });
+    } catch (error) {}
+    setFallDetection({ status: 'idle', message: 'Fall detection stopped' });
+    setIsLoading(false);
   };
 
-  const testAlert = async () => {
+  const testFallDetection = async () => {
     if (!robotUrl) {
       Alert.alert('Not Connected', 'Please connect to NAO robot first.');
       return;
     }
-
     setIsLoading(true);
     try {
-      const response = await axios.post(`${robotUrl}/api/robot/fall_detection/test`, {}, { timeout: 30000 });
-      if (response.data.success) {
-        Alert.alert('Test Complete', response.data.message || 'Test alert sent successfully!');
-      } else {
-        Alert.alert('Test Failed', response.data.message || 'Failed to send test alert');
-      }
+      const response = await axios.post(`${robotUrl}/api/robot/fall_detection/test`, {}, { timeout: 60000 });
+      Alert.alert('Test Complete', response.data.results?.join('\n') || 'Test finished');
     } catch (error: any) {
-      Alert.alert('Error', error.message || 'Failed to run test');
+      Alert.alert('Error', error.message);
     } finally {
       setIsLoading(false);
     }
   };
 
-  const getStatusIcon = () => {
-    switch (fallDetection.status) {
-      case 'monitoring':
-        return 'eye';
-      case 'person_detected':
-        return 'warning';
-      case 'checking':
-        return 'mic';
-      case 'alert_sent':
-        return 'mail';
-      case 'error':
-        return 'alert-circle';
-      default:
-        return 'shield-outline';
+  // ==================== EXERCISE ====================
+  const startExercise = async () => {
+    if (!robotUrl) {
+      Alert.alert('Not Connected', 'Please connect to NAO robot first.');
+      return;
+    }
+    setIsLoading(true);
+    try {
+      const response = await axios.post(`${robotUrl}/api/robot/exercise/start`, {}, { timeout: 10000 });
+      if (response.data.success) {
+        setExercise({
+          status: 'greeting',
+          message: 'Exercise session starting...',
+          currentExercise: '',
+          waitingForResponse: false,
+        });
+      } else {
+        Alert.alert('Error', response.data.message || 'Failed to start');
+      }
+    } catch (error: any) {
+      Alert.alert('Error', error.message || 'Failed to start exercise');
+    } finally {
+      setIsLoading(false);
     }
   };
 
-  const getStatusColor = () => {
-    switch (fallDetection.status) {
-      case 'monitoring':
+  const stopExercise = async () => {
+    setIsLoading(true);
+    try {
+      await axios.post(`${robotUrl}/api/robot/exercise/stop`, {}, { timeout: 10000 });
+    } catch (error) {}
+    setExercise({
+      status: 'idle',
+      message: 'Exercise session stopped',
+      currentExercise: '',
+      waitingForResponse: false,
+    });
+    setIsLoading(false);
+  };
+
+  const sendExerciseResponse = async (response: string) => {
+    if (!robotUrl) return;
+    setIsLoading(true);
+    try {
+      await axios.post(`${robotUrl}/api/robot/exercise/respond`, { response }, { timeout: 10000 });
+    } catch (error: any) {
+      Alert.alert('Error', error.message);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const getExerciseStatusColor = () => {
+    switch (exercise.status) {
+      case 'squat':
+      case 'arm_stretch':
+        return COLORS.success;
+      case 'readiness':
+      case 'continue_check':
+        return COLORS.warning;
+      case 'cooldown':
+      case 'feedback':
         return COLORS.primary;
-      case 'person_detected':
-        return COLORS.warning;
-      case 'checking':
-        return COLORS.warning;
-      case 'alert_sent':
-        return COLORS.error;
       case 'error':
         return COLORS.error;
       default:
@@ -164,15 +209,23 @@ export default function FunctionsScreen() {
     }
   };
 
-  const isActive = fallDetection.status !== 'idle' && fallDetection.status !== 'error';
+  const getFallStatusColor = () => {
+    switch (fallDetection.status) {
+      case 'monitoring': return COLORS.primary;
+      case 'person_detected':
+      case 'checking': return COLORS.warning;
+      case 'alert_sent':
+      case 'error': return COLORS.error;
+      default: return COLORS.textMuted;
+    }
+  };
+
+  const isFallActive = fallDetection.status !== 'idle' && fallDetection.status !== 'error';
+  const isExerciseActive = exercise.status !== 'idle' && exercise.status !== 'session_end';
 
   return (
     <SafeAreaView style={styles.container} edges={['left', 'right']}>
-      <ScrollView
-        style={styles.scrollView}
-        contentContainerStyle={styles.scrollContent}
-        showsVerticalScrollIndicator={false}
-      >
+      <ScrollView style={styles.scrollView} contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
         {/* Header */}
         <View style={styles.header}>
           <Ionicons name="shield-checkmark" size={32} color={COLORS.primary} />
@@ -184,331 +237,268 @@ export default function FunctionsScreen() {
           <Card style={styles.warningCard}>
             <View style={styles.warningContent}>
               <Ionicons name="warning" size={24} color={COLORS.warning} />
-              <Text style={styles.warningText}>
-                Connect to NAO robot to use safety functions
-              </Text>
+              <Text style={styles.warningText}>Connect to NAO robot to use functions</Text>
             </View>
           </Card>
         )}
 
-        {/* Fall Detection Section */}
-        <Card style={styles.card}>
-          <View style={styles.cardHeader}>
-            <View style={styles.cardTitleRow}>
-              <Ionicons name="body" size={24} color={COLORS.primary} />
-              <Text style={styles.cardTitle}>Fall Detection</Text>
-            </View>
-            <View style={[styles.statusBadge, { backgroundColor: getStatusColor() + '30' }]}>
-              <View style={[styles.statusDot, { backgroundColor: getStatusColor() }]} />
-              <Text style={[styles.statusText, { color: getStatusColor() }]}>
-                {fallDetection.status === 'idle' ? 'Inactive' : fallDetection.status.replace('_', ' ').toUpperCase()}
-              </Text>
-            </View>
-          </View>
-
-          <Text style={styles.description}>
-            Monitors for persons lying horizontal for more than 10-15 seconds. If detected, NAO will:
-          </Text>
-          
-          <View style={styles.stepsList}>
-            <View style={styles.stepItem}>
-              <View style={styles.stepNumber}><Text style={styles.stepNumberText}>1</Text></View>
-              <Text style={styles.stepText}>Move closer and ask "Are you okay?"</Text>
-            </View>
-            <View style={styles.stepItem}>
-              <View style={styles.stepNumber}><Text style={styles.stepNumberText}>2</Text></View>
-              <Text style={styles.stepText}>Wait 10 seconds for verbal response</Text>
-            </View>
-            <View style={styles.stepItem}>
-              <View style={styles.stepNumber}><Text style={styles.stepNumberText}>3</Text></View>
-              <Text style={styles.stepText}>Play loud alert sound if no response</Text>
-            </View>
-            <View style={styles.stepItem}>
-              <View style={styles.stepNumber}><Text style={styles.stepNumberText}>4</Text></View>
-              <Text style={styles.stepText}>Send email alert with photo to caretaker</Text>
-            </View>
-          </View>
-
-          {/* Status Display */}
-          <View style={[styles.statusDisplay, { borderColor: getStatusColor() }]}>
-            <Ionicons name={getStatusIcon() as any} size={40} color={getStatusColor()} />
-            <Text style={styles.statusMessage}>{fallDetection.message}</Text>
-            {fallDetection.lastAlert && (
-              <Text style={styles.lastAlert}>Last alert: {fallDetection.lastAlert}</Text>
-            )}
-          </View>
-
-          {/* Control Buttons */}
-          <View style={styles.buttonRow}>
-            {!isActive ? (
-              <TouchableOpacity
-                style={[styles.primaryButton, !isConnected && styles.buttonDisabled]}
-                onPress={startFallDetection}
-                disabled={!isConnected || isLoading}
-              >
-                {isLoading ? (
-                  <ActivityIndicator color={COLORS.text} />
-                ) : (
-                  <>
-                    <Ionicons name="play" size={20} color={COLORS.text} />
-                    <Text style={styles.buttonText}>Start Monitoring</Text>
-                  </>
-                )}
-              </TouchableOpacity>
-            ) : (
-              <TouchableOpacity
-                style={styles.stopButton}
-                onPress={stopFallDetection}
-                disabled={isLoading}
-              >
-                {isLoading ? (
-                  <ActivityIndicator color={COLORS.text} />
-                ) : (
-                  <>
-                    <Ionicons name="stop" size={20} color={COLORS.text} />
-                    <Text style={styles.buttonText}>Stop Monitoring</Text>
-                  </>
-                )}
-              </TouchableOpacity>
-            )}
-          </View>
-
-          {/* Test Button */}
+        {/* Tab Selector */}
+        <View style={styles.tabContainer}>
           <TouchableOpacity
-            style={[styles.testButton, !isConnected && styles.buttonDisabled]}
-            onPress={testAlert}
-            disabled={!isConnected || isLoading}
+            style={[styles.tab, activeTab === 'fall' && styles.tabActive]}
+            onPress={() => setActiveTab('fall')}
           >
-            <Ionicons name="flask" size={18} color={COLORS.primary} />
-            <Text style={styles.testButtonText}>Test Alert System</Text>
+            <Ionicons name="body" size={20} color={activeTab === 'fall' ? COLORS.text : COLORS.textMuted} />
+            <Text style={[styles.tabText, activeTab === 'fall' && styles.tabTextActive]}>Fall Detection</Text>
           </TouchableOpacity>
-        </Card>
+          <TouchableOpacity
+            style={[styles.tab, activeTab === 'exercise' && styles.tabActive]}
+            onPress={() => setActiveTab('exercise')}
+          >
+            <Ionicons name="fitness" size={20} color={activeTab === 'exercise' ? COLORS.text : COLORS.textMuted} />
+            <Text style={[styles.tabText, activeTab === 'exercise' && styles.tabTextActive]}>Exercise</Text>
+          </TouchableOpacity>
+        </View>
 
-        {/* Email Configuration Info */}
-        <Card style={styles.infoCard}>
-          <View style={styles.infoHeader}>
-            <Ionicons name="mail" size={20} color={COLORS.textSecondary} />
-            <Text style={styles.infoTitle}>Email Alert Configuration</Text>
-          </View>
-          <Text style={styles.infoText}>
-            Alerts will be sent to: sushanthsujeerkumar@gmail.com
-          </Text>
-          <Text style={styles.infoSubtext}>
-            Configure email settings in the nao.py script on your laptop
-          </Text>
-        </Card>
+        {/* ==================== FALL DETECTION TAB ==================== */}
+        {activeTab === 'fall' && (
+          <>
+            <Card style={styles.card}>
+              <View style={styles.cardHeader}>
+                <View style={styles.cardTitleRow}>
+                  <Ionicons name="body" size={24} color={COLORS.primary} />
+                  <Text style={styles.cardTitle}>Fall Detection</Text>
+                </View>
+                <View style={[styles.statusBadge, { backgroundColor: getFallStatusColor() + '30' }]}>
+                  <View style={[styles.statusDot, { backgroundColor: getFallStatusColor() }]} />
+                  <Text style={[styles.statusText, { color: getFallStatusColor() }]}>
+                    {fallDetection.status === 'idle' ? 'Inactive' : fallDetection.status.replace('_', ' ').toUpperCase()}
+                  </Text>
+                </View>
+              </View>
 
-        {/* How It Works */}
-        <Card style={styles.infoCard}>
-          <View style={styles.infoHeader}>
-            <Ionicons name="information-circle" size={20} color={COLORS.textSecondary} />
-            <Text style={styles.infoTitle}>How It Works</Text>
-          </View>
-          <Text style={styles.infoText}>
-            The NAO robot uses its camera to detect if a person is lying horizontal. 
-            Using pose detection, it monitors the person's position and triggers the 
-            alert sequence if they remain horizontal for the configured duration.
-          </Text>
-        </Card>
+              <Text style={styles.description}>
+                Monitors for persons lying horizontal. If detected, NAO will check on them and send alerts.
+              </Text>
+
+              {/* Status Display */}
+              <View style={[styles.statusDisplay, { borderColor: getFallStatusColor() }]}>
+                <Ionicons name={fallDetection.status === 'monitoring' ? 'eye' : 'shield-outline'} size={40} color={getFallStatusColor()} />
+                <Text style={styles.statusMessage}>{fallDetection.message}</Text>
+                {fallDetection.lastAlert && <Text style={styles.lastAlert}>Last alert: {fallDetection.lastAlert}</Text>}
+              </View>
+
+              {/* Control Buttons */}
+              <View style={styles.buttonRow}>
+                {!isFallActive ? (
+                  <TouchableOpacity style={[styles.primaryButton, !isConnected && styles.buttonDisabled]} onPress={startFallDetection} disabled={!isConnected || isLoading}>
+                    {isLoading ? <ActivityIndicator color={COLORS.text} /> : (
+                      <>
+                        <Ionicons name="play" size={20} color={COLORS.text} />
+                        <Text style={styles.buttonText}>Start Monitoring</Text>
+                      </>
+                    )}
+                  </TouchableOpacity>
+                ) : (
+                  <TouchableOpacity style={styles.stopButton} onPress={stopFallDetection} disabled={isLoading}>
+                    {isLoading ? <ActivityIndicator color={COLORS.text} /> : (
+                      <>
+                        <Ionicons name="stop" size={20} color={COLORS.text} />
+                        <Text style={styles.buttonText}>Stop Monitoring</Text>
+                      </>
+                    )}
+                  </TouchableOpacity>
+                )}
+              </View>
+
+              <TouchableOpacity style={[styles.testButton, !isConnected && styles.buttonDisabled]} onPress={testFallDetection} disabled={!isConnected || isLoading}>
+                <Ionicons name="flask" size={18} color={COLORS.primary} />
+                <Text style={styles.testButtonText}>Test Alert System</Text>
+              </TouchableOpacity>
+            </Card>
+
+            <Card style={styles.infoCard}>
+              <View style={styles.infoHeader}>
+                <Ionicons name="mail" size={20} color={COLORS.textSecondary} />
+                <Text style={styles.infoTitle}>Email Alert</Text>
+              </View>
+              <Text style={styles.infoText}>Alerts sent to: sushanthsujeerkumar@gmail.com</Text>
+            </Card>
+          </>
+        )}
+
+        {/* ==================== EXERCISE TAB ==================== */}
+        {activeTab === 'exercise' && (
+          <>
+            <Card style={styles.card}>
+              <View style={styles.cardHeader}>
+                <View style={styles.cardTitleRow}>
+                  <Ionicons name="fitness" size={24} color={COLORS.success} />
+                  <Text style={styles.cardTitle}>Exercise Session</Text>
+                </View>
+                <View style={[styles.statusBadge, { backgroundColor: getExerciseStatusColor() + '30' }]}>
+                  <View style={[styles.statusDot, { backgroundColor: getExerciseStatusColor() }]} />
+                  <Text style={[styles.statusText, { color: getExerciseStatusColor() }]}>
+                    {exercise.status === 'idle' ? 'Ready' : exercise.status.replace('_', ' ').toUpperCase()}
+                  </Text>
+                </View>
+              </View>
+
+              <Text style={styles.description}>
+                Guided exercise session with NAO. Includes squats, arm stretches, and cooldown breathing.
+              </Text>
+
+              {/* Exercise Steps */}
+              <View style={styles.stepsList}>
+                <View style={styles.stepItem}>
+                  <View style={[styles.stepNumber, exercise.status === 'squat' && styles.stepActive]}>
+                    <Text style={styles.stepNumberText}>1</Text>
+                  </View>
+                  <Text style={styles.stepText}>Supported Squats (3 reps)</Text>
+                </View>
+                <View style={styles.stepItem}>
+                  <View style={[styles.stepNumber, exercise.status === 'arm_stretch' && styles.stepActive]}>
+                    <Text style={styles.stepNumberText}>2</Text>
+                  </View>
+                  <Text style={styles.stepText}>Arm Stretches (3 reps)</Text>
+                </View>
+                <View style={styles.stepItem}>
+                  <View style={[styles.stepNumber, exercise.status === 'cooldown' && styles.stepActive]}>
+                    <Text style={styles.stepNumberText}>3</Text>
+                  </View>
+                  <Text style={styles.stepText}>Cooldown & Breathing</Text>
+                </View>
+              </View>
+
+              {/* Status Display */}
+              <View style={[styles.statusDisplay, { borderColor: getExerciseStatusColor() }]}>
+                <Ionicons 
+                  name={
+                    exercise.status === 'squat' || exercise.status === 'arm_stretch' ? 'barbell' :
+                    exercise.status === 'cooldown' ? 'leaf' :
+                    exercise.status === 'feedback' ? 'happy' :
+                    'fitness-outline'
+                  } 
+                  size={40} 
+                  color={getExerciseStatusColor()} 
+                />
+                <Text style={styles.statusMessage}>{exercise.message}</Text>
+                {exercise.currentExercise && (
+                  <Text style={styles.currentExercise}>Current: {exercise.currentExercise}</Text>
+                )}
+              </View>
+
+              {/* Response Buttons (when waiting) */}
+              {exercise.waitingForResponse && (
+                <View style={styles.responseContainer}>
+                  <Text style={styles.responsePrompt}>NAO is waiting for your response:</Text>
+                  <View style={styles.responseButtons}>
+                    <TouchableOpacity style={styles.yesButton} onPress={() => sendExerciseResponse('yes')} disabled={isLoading}>
+                      <Ionicons name="checkmark" size={24} color={COLORS.text} />
+                      <Text style={styles.responseButtonText}>Yes</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity style={styles.noButton} onPress={() => sendExerciseResponse('no')} disabled={isLoading}>
+                      <Ionicons name="close" size={24} color={COLORS.text} />
+                      <Text style={styles.responseButtonText}>No</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity style={styles.stopResponseButton} onPress={() => sendExerciseResponse('stop')} disabled={isLoading}>
+                      <Ionicons name="hand-left" size={24} color={COLORS.text} />
+                      <Text style={styles.responseButtonText}>Stop</Text>
+                    </TouchableOpacity>
+                  </View>
+                </View>
+              )}
+
+              {/* Control Buttons */}
+              <View style={styles.buttonRow}>
+                {!isExerciseActive ? (
+                  <TouchableOpacity style={[styles.successButton, !isConnected && styles.buttonDisabled]} onPress={startExercise} disabled={!isConnected || isLoading}>
+                    {isLoading ? <ActivityIndicator color={COLORS.text} /> : (
+                      <>
+                        <Ionicons name="play" size={20} color={COLORS.text} />
+                        <Text style={styles.buttonText}>Start Exercise</Text>
+                      </>
+                    )}
+                  </TouchableOpacity>
+                ) : (
+                  <TouchableOpacity style={styles.stopButton} onPress={stopExercise} disabled={isLoading}>
+                    {isLoading ? <ActivityIndicator color={COLORS.text} /> : (
+                      <>
+                        <Ionicons name="stop" size={20} color={COLORS.text} />
+                        <Text style={styles.buttonText}>Stop Exercise</Text>
+                      </>
+                    )}
+                  </TouchableOpacity>
+                )}
+              </View>
+            </Card>
+
+            <Card style={styles.infoCard}>
+              <View style={styles.infoHeader}>
+                <Ionicons name="information-circle" size={20} color={COLORS.textSecondary} />
+                <Text style={styles.infoTitle}>How It Works</Text>
+              </View>
+              <Text style={styles.infoText}>
+                NAO guides you through gentle exercises with voice instructions and demonstrations. 
+                Respond to NAO's prompts using the buttons above or by speaking.
+              </Text>
+            </Card>
+          </>
+        )}
       </ScrollView>
     </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: COLORS.background,
-  },
-  scrollView: {
-    flex: 1,
-  },
-  scrollContent: {
-    padding: SPACING.md,
-    paddingBottom: SPACING.xxl,
-  },
-  header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: SPACING.lg,
-    gap: SPACING.sm,
-  },
-  headerTitle: {
-    fontSize: FONT_SIZES.xxl,
-    fontWeight: 'bold',
-    color: COLORS.text,
-  },
-  warningCard: {
-    backgroundColor: COLORS.warning + '20',
-    borderColor: COLORS.warning,
-    borderWidth: 1,
-    marginBottom: SPACING.md,
-  },
-  warningContent: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: SPACING.sm,
-  },
-  warningText: {
-    color: COLORS.warning,
-    fontSize: FONT_SIZES.md,
-    flex: 1,
-  },
-  card: {
-    marginBottom: SPACING.md,
-  },
-  cardHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: SPACING.md,
-  },
-  cardTitleRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: SPACING.sm,
-  },
-  cardTitle: {
-    fontSize: FONT_SIZES.xl,
-    fontWeight: 'bold',
-    color: COLORS.text,
-  },
-  statusBadge: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: SPACING.sm,
-    paddingVertical: SPACING.xs,
-    borderRadius: BORDER_RADIUS.full,
-    gap: 6,
-  },
-  statusDot: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
-  },
-  statusText: {
-    fontSize: FONT_SIZES.xs,
-    fontWeight: '600',
-  },
-  description: {
-    color: COLORS.textSecondary,
-    fontSize: FONT_SIZES.md,
-    lineHeight: 22,
-    marginBottom: SPACING.md,
-  },
-  stepsList: {
-    marginBottom: SPACING.lg,
-  },
-  stepItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: SPACING.sm,
-    gap: SPACING.sm,
-  },
-  stepNumber: {
-    width: 24,
-    height: 24,
-    borderRadius: 12,
-    backgroundColor: COLORS.primary + '30',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  stepNumberText: {
-    color: COLORS.primary,
-    fontSize: FONT_SIZES.sm,
-    fontWeight: 'bold',
-  },
-  stepText: {
-    color: COLORS.textSecondary,
-    fontSize: FONT_SIZES.sm,
-    flex: 1,
-  },
-  statusDisplay: {
-    backgroundColor: COLORS.surfaceLight,
-    borderRadius: BORDER_RADIUS.md,
-    padding: SPACING.lg,
-    alignItems: 'center',
-    marginBottom: SPACING.lg,
-    borderWidth: 2,
-  },
-  statusMessage: {
-    color: COLORS.text,
-    fontSize: FONT_SIZES.md,
-    textAlign: 'center',
-    marginTop: SPACING.sm,
-  },
-  lastAlert: {
-    color: COLORS.textMuted,
-    fontSize: FONT_SIZES.sm,
-    marginTop: SPACING.xs,
-  },
-  buttonRow: {
-    marginBottom: SPACING.md,
-  },
-  primaryButton: {
-    backgroundColor: COLORS.primary,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    padding: SPACING.md,
-    borderRadius: BORDER_RADIUS.md,
-    gap: SPACING.sm,
-  },
-  stopButton: {
-    backgroundColor: COLORS.error,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    padding: SPACING.md,
-    borderRadius: BORDER_RADIUS.md,
-    gap: SPACING.sm,
-  },
-  buttonDisabled: {
-    opacity: 0.5,
-  },
-  buttonText: {
-    color: COLORS.text,
-    fontSize: FONT_SIZES.lg,
-    fontWeight: '600',
-  },
-  testButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    padding: SPACING.md,
-    borderRadius: BORDER_RADIUS.md,
-    borderWidth: 1,
-    borderColor: COLORS.primary,
-    gap: SPACING.sm,
-  },
-  testButtonText: {
-    color: COLORS.primary,
-    fontSize: FONT_SIZES.md,
-    fontWeight: '600',
-  },
-  infoCard: {
-    marginBottom: SPACING.md,
-    backgroundColor: COLORS.surfaceLight,
-  },
-  infoHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: SPACING.sm,
-    marginBottom: SPACING.sm,
-  },
-  infoTitle: {
-    color: COLORS.text,
-    fontSize: FONT_SIZES.md,
-    fontWeight: '600',
-  },
-  infoText: {
-    color: COLORS.textSecondary,
-    fontSize: FONT_SIZES.sm,
-    lineHeight: 20,
-  },
-  infoSubtext: {
-    color: COLORS.textMuted,
-    fontSize: FONT_SIZES.xs,
-    marginTop: SPACING.xs,
-  },
+  container: { flex: 1, backgroundColor: COLORS.background },
+  scrollView: { flex: 1 },
+  scrollContent: { padding: SPACING.md, paddingBottom: SPACING.xxl },
+  header: { flexDirection: 'row', alignItems: 'center', marginBottom: SPACING.lg, gap: SPACING.sm },
+  headerTitle: { fontSize: FONT_SIZES.xxl, fontWeight: 'bold', color: COLORS.text },
+  warningCard: { backgroundColor: COLORS.warning + '20', borderColor: COLORS.warning, borderWidth: 1, marginBottom: SPACING.md },
+  warningContent: { flexDirection: 'row', alignItems: 'center', gap: SPACING.sm },
+  warningText: { color: COLORS.warning, fontSize: FONT_SIZES.md, flex: 1 },
+  tabContainer: { flexDirection: 'row', marginBottom: SPACING.md, backgroundColor: COLORS.surface, borderRadius: BORDER_RADIUS.md, padding: 4 },
+  tab: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', paddingVertical: SPACING.sm, borderRadius: BORDER_RADIUS.sm, gap: SPACING.xs },
+  tabActive: { backgroundColor: COLORS.primary },
+  tabText: { fontSize: FONT_SIZES.md, color: COLORS.textMuted },
+  tabTextActive: { color: COLORS.text, fontWeight: '600' },
+  card: { marginBottom: SPACING.md },
+  cardHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: SPACING.md },
+  cardTitleRow: { flexDirection: 'row', alignItems: 'center', gap: SPACING.sm },
+  cardTitle: { fontSize: FONT_SIZES.xl, fontWeight: 'bold', color: COLORS.text },
+  statusBadge: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: SPACING.sm, paddingVertical: SPACING.xs, borderRadius: BORDER_RADIUS.full, gap: 6 },
+  statusDot: { width: 8, height: 8, borderRadius: 4 },
+  statusText: { fontSize: FONT_SIZES.xs, fontWeight: '600' },
+  description: { color: COLORS.textSecondary, fontSize: FONT_SIZES.md, lineHeight: 22, marginBottom: SPACING.md },
+  stepsList: { marginBottom: SPACING.lg },
+  stepItem: { flexDirection: 'row', alignItems: 'center', marginBottom: SPACING.sm, gap: SPACING.sm },
+  stepNumber: { width: 28, height: 28, borderRadius: 14, backgroundColor: COLORS.primary + '30', justifyContent: 'center', alignItems: 'center' },
+  stepActive: { backgroundColor: COLORS.success },
+  stepNumberText: { color: COLORS.primary, fontSize: FONT_SIZES.sm, fontWeight: 'bold' },
+  stepText: { color: COLORS.textSecondary, fontSize: FONT_SIZES.sm, flex: 1 },
+  statusDisplay: { backgroundColor: COLORS.surfaceLight, borderRadius: BORDER_RADIUS.md, padding: SPACING.lg, alignItems: 'center', marginBottom: SPACING.lg, borderWidth: 2 },
+  statusMessage: { color: COLORS.text, fontSize: FONT_SIZES.md, textAlign: 'center', marginTop: SPACING.sm },
+  lastAlert: { color: COLORS.textMuted, fontSize: FONT_SIZES.sm, marginTop: SPACING.xs },
+  currentExercise: { color: COLORS.success, fontSize: FONT_SIZES.sm, fontWeight: '600', marginTop: SPACING.xs },
+  responseContainer: { backgroundColor: COLORS.warning + '20', borderRadius: BORDER_RADIUS.md, padding: SPACING.md, marginBottom: SPACING.md },
+  responsePrompt: { color: COLORS.warning, fontSize: FONT_SIZES.md, fontWeight: '600', textAlign: 'center', marginBottom: SPACING.sm },
+  responseButtons: { flexDirection: 'row', justifyContent: 'space-around', gap: SPACING.sm },
+  yesButton: { flex: 1, backgroundColor: COLORS.success, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', padding: SPACING.sm, borderRadius: BORDER_RADIUS.md, gap: SPACING.xs },
+  noButton: { flex: 1, backgroundColor: COLORS.textMuted, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', padding: SPACING.sm, borderRadius: BORDER_RADIUS.md, gap: SPACING.xs },
+  stopResponseButton: { flex: 1, backgroundColor: COLORS.error, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', padding: SPACING.sm, borderRadius: BORDER_RADIUS.md, gap: SPACING.xs },
+  responseButtonText: { color: COLORS.text, fontSize: FONT_SIZES.md, fontWeight: '600' },
+  buttonRow: { marginBottom: SPACING.md },
+  primaryButton: { backgroundColor: COLORS.primary, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', padding: SPACING.md, borderRadius: BORDER_RADIUS.md, gap: SPACING.sm },
+  successButton: { backgroundColor: COLORS.success, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', padding: SPACING.md, borderRadius: BORDER_RADIUS.md, gap: SPACING.sm },
+  stopButton: { backgroundColor: COLORS.error, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', padding: SPACING.md, borderRadius: BORDER_RADIUS.md, gap: SPACING.sm },
+  buttonDisabled: { opacity: 0.5 },
+  buttonText: { color: COLORS.text, fontSize: FONT_SIZES.lg, fontWeight: '600' },
+  testButton: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', padding: SPACING.md, borderRadius: BORDER_RADIUS.md, borderWidth: 1, borderColor: COLORS.primary, gap: SPACING.sm },
+  testButtonText: { color: COLORS.primary, fontSize: FONT_SIZES.md, fontWeight: '600' },
+  infoCard: { marginBottom: SPACING.md, backgroundColor: COLORS.surfaceLight },
+  infoHeader: { flexDirection: 'row', alignItems: 'center', gap: SPACING.sm, marginBottom: SPACING.sm },
+  infoTitle: { color: COLORS.text, fontSize: FONT_SIZES.md, fontWeight: '600' },
+  infoText: { color: COLORS.textSecondary, fontSize: FONT_SIZES.sm, lineHeight: 20 },
 });
