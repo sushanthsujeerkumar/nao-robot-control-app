@@ -30,6 +30,12 @@ export default function FunctionsScreen() {
     currentExercise: '',
     waitingForResponse: false,
   });
+
+  const [automation, setAutomation] = useState({
+    lightStatus: false,
+    esp32Connected: false,
+    lastAction: '',
+  });
   
   const [isLoading, setIsLoading] = useState(false);
   const [activeTab, setActiveTab] = useState('fall');
@@ -171,6 +177,79 @@ export default function FunctionsScreen() {
     }
   };
 
+  // Automation Functions
+  const controlLight = async (action) => {
+    if (!robotUrl) {
+      Alert.alert('Not Connected', 'Please connect to NAO robot first.');
+      return;
+    }
+    setIsLoading(true);
+    try {
+      const response = await axios.post(`${robotUrl}/api/automation/light`, { action }, { timeout: 15000 });
+      if (response.data.success) {
+        setAutomation(prev => ({
+          ...prev,
+          lightStatus: action === 'on',
+          esp32Connected: true,
+          lastAction: `Light turned ${action} at ${new Date().toLocaleTimeString()}`,
+        }));
+      } else {
+        Alert.alert('Error', response.data.message || 'Failed to control light');
+        setAutomation(prev => ({ ...prev, esp32Connected: false }));
+      }
+    } catch (error) {
+      Alert.alert('Error', 'Failed to control light. Check ESP32 connection.');
+      setAutomation(prev => ({ ...prev, esp32Connected: false }));
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const voiceControlLight = async (action) => {
+    if (!robotUrl) {
+      Alert.alert('Not Connected', 'Please connect to NAO robot first.');
+      return;
+    }
+    setIsLoading(true);
+    try {
+      const response = await axios.post(`${robotUrl}/api/automation/voice_light`, { action }, { timeout: 20000 });
+      if (response.data.success) {
+        setAutomation(prev => ({
+          ...prev,
+          lightStatus: action === 'on',
+          esp32Connected: true,
+          lastAction: `NAO said: "${response.data.speech}" at ${new Date().toLocaleTimeString()}`,
+        }));
+      } else {
+        Alert.alert('Error', response.data.message || 'Failed to control light');
+      }
+    } catch (error) {
+      Alert.alert('Error', 'Failed to control light via voice.');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const checkESP32Status = async () => {
+    if (!robotUrl) return;
+    try {
+      const response = await axios.get(`${robotUrl}/api/automation/status`, { timeout: 5000 });
+      setAutomation(prev => ({
+        ...prev,
+        esp32Connected: response.data.esp32_connected || false,
+        lightStatus: response.data.light_status || false,
+      }));
+    } catch (error) {
+      setAutomation(prev => ({ ...prev, esp32Connected: false }));
+    }
+  };
+
+  useEffect(() => {
+    if (activeTab === 'automation' && robotUrl) {
+      checkESP32Status();
+    }
+  }, [activeTab, robotUrl]);
+
   const getExerciseStatusColor = () => {
     switch (exercise.status) {
       case 'squat':
@@ -226,7 +305,7 @@ export default function FunctionsScreen() {
             onPress={() => setActiveTab('fall')}
           >
             <Ionicons name="body" size={20} color={activeTab === 'fall' ? COLORS.text : COLORS.textMuted} />
-            <Text style={[styles.tabText, activeTab === 'fall' && styles.tabTextActive]}>Fall Detection</Text>
+            <Text style={[styles.tabText, activeTab === 'fall' && styles.tabTextActive]}>Fall</Text>
           </TouchableOpacity>
           <TouchableOpacity
             style={[styles.tab, activeTab === 'exercise' && styles.tabActive]}
@@ -234,6 +313,13 @@ export default function FunctionsScreen() {
           >
             <Ionicons name="fitness" size={20} color={activeTab === 'exercise' ? COLORS.text : COLORS.textMuted} />
             <Text style={[styles.tabText, activeTab === 'exercise' && styles.tabTextActive]}>Exercise</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.tab, activeTab === 'automation' && styles.tabActive]}
+            onPress={() => setActiveTab('automation')}
+          >
+            <Ionicons name="bulb" size={20} color={activeTab === 'automation' ? COLORS.text : COLORS.textMuted} />
+            <Text style={[styles.tabText, activeTab === 'automation' && styles.tabTextActive]}>Automation</Text>
           </TouchableOpacity>
         </View>
 
@@ -413,6 +499,114 @@ export default function FunctionsScreen() {
             </Card>
           </>
         )}
+
+        {activeTab === 'automation' && (
+          <>
+            <Card style={styles.card}>
+              <View style={styles.cardHeader}>
+                <View style={styles.cardTitleRow}>
+                  <Ionicons name="bulb" size={24} color={automation.lightStatus ? COLORS.warning : COLORS.textMuted} />
+                  <Text style={styles.cardTitle}>Smart Light Control</Text>
+                </View>
+                <View style={[styles.statusBadge, { backgroundColor: automation.esp32Connected ? COLORS.success + '30' : COLORS.error + '30' }]}>
+                  <View style={[styles.statusDot, { backgroundColor: automation.esp32Connected ? COLORS.success : COLORS.error }]} />
+                  <Text style={[styles.statusText, { color: automation.esp32Connected ? COLORS.success : COLORS.error }]}>
+                    {automation.esp32Connected ? 'ESP32 Connected' : 'ESP32 Offline'}
+                  </Text>
+                </View>
+              </View>
+
+              <Text style={styles.description}>
+                Control your room light using NAO robot. NAO will speak and then turn the light on or off via ESP32.
+              </Text>
+
+              <View style={[styles.lightStatusDisplay, { backgroundColor: automation.lightStatus ? COLORS.warning + '20' : COLORS.surfaceLight }]}>
+                <Ionicons 
+                  name={automation.lightStatus ? 'bulb' : 'bulb-outline'} 
+                  size={80} 
+                  color={automation.lightStatus ? COLORS.warning : COLORS.textMuted} 
+                />
+                <Text style={[styles.lightStatusText, { color: automation.lightStatus ? COLORS.warning : COLORS.textMuted }]}>
+                  Light is {automation.lightStatus ? 'ON' : 'OFF'}
+                </Text>
+                {automation.lastAction ? (
+                  <Text style={styles.lastActionText}>{automation.lastAction}</Text>
+                ) : null}
+              </View>
+
+              <Text style={styles.sectionTitle}>Manual Control</Text>
+              <View style={styles.lightButtonsRow}>
+                <TouchableOpacity 
+                  style={[styles.lightOnButton, !isConnected && styles.buttonDisabled]} 
+                  onPress={() => controlLight('on')} 
+                  disabled={!isConnected || isLoading}
+                >
+                  {isLoading ? <ActivityIndicator color={COLORS.text} /> : (
+                    <>
+                      <Ionicons name="sunny" size={24} color={COLORS.text} />
+                      <Text style={styles.buttonText}>Turn ON</Text>
+                    </>
+                  )}
+                </TouchableOpacity>
+                <TouchableOpacity 
+                  style={[styles.lightOffButton, !isConnected && styles.buttonDisabled]} 
+                  onPress={() => controlLight('off')} 
+                  disabled={!isConnected || isLoading}
+                >
+                  {isLoading ? <ActivityIndicator color={COLORS.text} /> : (
+                    <>
+                      <Ionicons name="moon" size={24} color={COLORS.text} />
+                      <Text style={styles.buttonText}>Turn OFF</Text>
+                    </>
+                  )}
+                </TouchableOpacity>
+              </View>
+
+              <Text style={styles.sectionTitle}>Voice Control (NAO Speaks)</Text>
+              <Text style={styles.voiceDescription}>
+                NAO will say the command and then control the light
+              </Text>
+              <View style={styles.lightButtonsRow}>
+                <TouchableOpacity 
+                  style={[styles.voiceOnButton, !isConnected && styles.buttonDisabled]} 
+                  onPress={() => voiceControlLight('on')} 
+                  disabled={!isConnected || isLoading}
+                >
+                  {isLoading ? <ActivityIndicator color={COLORS.text} /> : (
+                    <>
+                      <Ionicons name="mic" size={20} color={COLORS.text} />
+                      <Text style={styles.voiceButtonText}>Turn on light</Text>
+                    </>
+                  )}
+                </TouchableOpacity>
+                <TouchableOpacity 
+                  style={[styles.voiceOffButton, !isConnected && styles.buttonDisabled]} 
+                  onPress={() => voiceControlLight('off')} 
+                  disabled={!isConnected || isLoading}
+                >
+                  {isLoading ? <ActivityIndicator color={COLORS.text} /> : (
+                    <>
+                      <Ionicons name="mic" size={20} color={COLORS.text} />
+                      <Text style={styles.voiceButtonText}>Turn off light</Text>
+                    </>
+                  )}
+                </TouchableOpacity>
+              </View>
+            </Card>
+
+            <Card style={styles.infoCard}>
+              <View style={styles.infoHeader}>
+                <Ionicons name="hardware-chip" size={20} color={COLORS.textSecondary} />
+                <Text style={styles.infoTitle}>ESP32 Setup</Text>
+              </View>
+              <Text style={styles.infoText}>
+                ESP32 IP: 172.18.16.50{'\n'}
+                LED Pin: GPIO 4{'\n'}
+                WiFi: ll_cst_labs
+              </Text>
+            </Card>
+          </>
+        )}
       </ScrollView>
     </SafeAreaView>
   );
@@ -469,4 +663,16 @@ const styles = StyleSheet.create({
   infoHeader: { flexDirection: 'row', alignItems: 'center', gap: SPACING.sm, marginBottom: SPACING.sm },
   infoTitle: { color: COLORS.text, fontSize: FONT_SIZES.md, fontWeight: '600' },
   infoText: { color: COLORS.textSecondary, fontSize: FONT_SIZES.sm, lineHeight: 20 },
+  // Automation styles
+  lightStatusDisplay: { borderRadius: BORDER_RADIUS.lg, padding: SPACING.xl, alignItems: 'center', marginBottom: SPACING.lg, borderWidth: 2, borderColor: COLORS.border },
+  lightStatusText: { fontSize: FONT_SIZES.xl, fontWeight: 'bold', marginTop: SPACING.md },
+  lastActionText: { color: COLORS.textSecondary, fontSize: FONT_SIZES.sm, marginTop: SPACING.sm, textAlign: 'center' },
+  sectionTitle: { color: COLORS.text, fontSize: FONT_SIZES.md, fontWeight: '600', marginBottom: SPACING.sm, marginTop: SPACING.sm },
+  voiceDescription: { color: COLORS.textSecondary, fontSize: FONT_SIZES.sm, marginBottom: SPACING.md },
+  lightButtonsRow: { flexDirection: 'row', gap: SPACING.md, marginBottom: SPACING.md },
+  lightOnButton: { flex: 1, backgroundColor: COLORS.warning, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', padding: SPACING.md, borderRadius: BORDER_RADIUS.md, gap: SPACING.sm },
+  lightOffButton: { flex: 1, backgroundColor: COLORS.textMuted, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', padding: SPACING.md, borderRadius: BORDER_RADIUS.md, gap: SPACING.sm },
+  voiceOnButton: { flex: 1, backgroundColor: COLORS.success, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', padding: SPACING.md, borderRadius: BORDER_RADIUS.md, gap: SPACING.xs },
+  voiceOffButton: { flex: 1, backgroundColor: COLORS.primary, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', padding: SPACING.md, borderRadius: BORDER_RADIUS.md, gap: SPACING.xs },
+  voiceButtonText: { color: COLORS.text, fontSize: FONT_SIZES.sm, fontWeight: '600' },
 });

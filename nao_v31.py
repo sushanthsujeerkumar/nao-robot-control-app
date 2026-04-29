@@ -1321,6 +1321,111 @@ def exercise_respond():
     exercise_state.response_event.set()
     return jsonify({"success": True, "response": response})
 
+# ==================== ESP32 AUTOMATION ====================
+ESP32_IP = "172.18.16.50"
+ESP32_PORT = 80
+light_status = False
+
+def control_esp32_light(action):
+    """Send HTTP request to ESP32 to control LED"""
+    global light_status
+    try:
+        import urllib.request
+        url = f"http://{ESP32_IP}:{ESP32_PORT}/{action}"
+        req = urllib.request.Request(url, method='GET')
+        with urllib.request.urlopen(req, timeout=5) as response:
+            result = response.read().decode('utf-8')
+            light_status = (action == 'on')
+            print(f"ESP32 response: {result}")
+            return True, result
+    except Exception as e:
+        print(f"ESP32 error: {e}")
+        return False, str(e)
+
+def check_esp32_connection():
+    """Check if ESP32 is reachable"""
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(2)
+        result = sock.connect_ex((ESP32_IP, ESP32_PORT))
+        sock.close()
+        return result == 0
+    except:
+        return False
+
+@app.route('/api/automation/light', methods=['POST'])
+def automation_light():
+    """Control light without NAO speaking"""
+    data = request.get_json() or {}
+    action = data.get('action', 'off').lower()
+    
+    if action not in ['on', 'off']:
+        return jsonify({"success": False, "message": "Invalid action. Use 'on' or 'off'"})
+    
+    success, result = control_esp32_light(action)
+    
+    if success:
+        return jsonify({
+            "success": True,
+            "message": f"Light turned {action}",
+            "light_status": light_status
+        })
+    else:
+        return jsonify({
+            "success": False,
+            "message": f"Failed to control light: {result}"
+        })
+
+@app.route('/api/automation/voice_light', methods=['POST'])
+def automation_voice_light():
+    """Control light with NAO speaking first"""
+    data = request.get_json() or {}
+    action = data.get('action', 'off').lower()
+    
+    if action not in ['on', 'off']:
+        return jsonify({"success": False, "message": "Invalid action. Use 'on' or 'off'"})
+    
+    # NAO speaks first
+    if action == 'on':
+        speech = "I am turning on the light"
+    else:
+        speech = "I am turning off the light"
+    
+    if nao.connected:
+        nao.speak(speech)
+        time.sleep(0.5)
+    
+    # Then control the light
+    success, result = control_esp32_light(action)
+    
+    if success:
+        if nao.connected:
+            nao.speak(f"Done. The light is now {action}.")
+        return jsonify({
+            "success": True,
+            "message": f"Light turned {action}",
+            "speech": speech,
+            "light_status": light_status
+        })
+    else:
+        if nao.connected:
+            nao.speak("Sorry, I could not control the light.")
+        return jsonify({
+            "success": False,
+            "message": f"Failed to control light: {result}",
+            "speech": speech
+        })
+
+@app.route('/api/automation/status', methods=['GET'])
+def automation_status():
+    """Get automation status"""
+    esp32_connected = check_esp32_connection()
+    return jsonify({
+        "esp32_connected": esp32_connected,
+        "esp32_ip": ESP32_IP,
+        "light_status": light_status
+    })
+
 def get_local_ip():
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -1334,15 +1439,22 @@ def get_local_ip():
 if __name__ == '__main__':
     local_ip = get_local_ip()
     print("="*60)
-    print("  NAO Robot API v3.1")
-    print("  Features: Fall Detection + Exercise + 22 Gestures")
+    print("  NAO Robot API v3.2")
+    print("  Features: Fall Detection + Exercise + 22 Gestures + Automation")
     print("="*60)
     print(f"  NAO: {NAO_IP}")
+    print(f"  ESP32: {ESP32_IP} (LED on GPIO 4)")
     print(f"  Server: http://{local_ip}:{SERVER_PORT}")
     print(f"  OpenCV: {'YES' if OPENCV_AVAILABLE else 'NO'}")
     print("="*60)
     
     result = nao.connect(NAO_IP)
     print(f"NAO: {result['message']}")
+    
+    # Check ESP32 connection
+    if check_esp32_connection():
+        print(f"ESP32: Connected at {ESP32_IP}")
+    else:
+        print(f"ESP32: Not reachable at {ESP32_IP}")
     
     app.run(host='0.0.0.0', port=SERVER_PORT, debug=False, threaded=True)
