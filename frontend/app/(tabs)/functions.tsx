@@ -36,7 +36,7 @@ export default function FunctionsScreen() {
     lightStatus: false,
     esp32Connected: false,
     lastAction: '',
-    esp32Ip: '172.18.16.59',
+    esp32Ip: '172.18.16.43',
     isListening: false,
   });
 
@@ -49,7 +49,7 @@ export default function FunctionsScreen() {
   
   const [isLoading, setIsLoading] = useState(false);
   const [activeTab, setActiveTab] = useState('fall');
-  const [esp32IpInput, setEsp32IpInput] = useState('172.18.16.59');
+  const [esp32IpInput, setEsp32IpInput] = useState('172.18.16.43');
   const pollingRef = useRef(null);
 
   const stories = [
@@ -790,7 +790,7 @@ export default function FunctionsScreen() {
                 <Text style={styles.infoTitle}>ESP32 Setup</Text>
               </View>
               <Text style={styles.infoText}>
-                ESP32 IP: 172.18.16.59{'\n'}
+                ESP32 IP: {automation.esp32Ip}{'\n'}
                 LED Pin: GPIO 4{'\n'}
                 WiFi: ll_cst_labs
               </Text>
