@@ -7,6 +7,7 @@ import {
   TouchableOpacity,
   ActivityIndicator,
   Alert,
+  TextInput,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
@@ -35,6 +36,8 @@ export default function FunctionsScreen() {
     lightStatus: false,
     esp32Connected: false,
     lastAction: '',
+    esp32Ip: '172.18.16.59',
+    isListening: false,
   });
 
   const [storytelling, setStorytelling] = useState({
@@ -46,6 +49,7 @@ export default function FunctionsScreen() {
   
   const [isLoading, setIsLoading] = useState(false);
   const [activeTab, setActiveTab] = useState('fall');
+  const [esp32IpInput, setEsp32IpInput] = useState('172.18.16.59');
   const pollingRef = useRef(null);
 
   const stories = [
@@ -200,7 +204,7 @@ export default function FunctionsScreen() {
     }
     setIsLoading(true);
     try {
-      const response = await axios.post(`${robotUrl}/api/automation/light`, { action }, { timeout: 15000 });
+      const response = await axios.post(`${robotUrl}/api/automation/light`, { action, esp32_ip: automation.esp32Ip }, { timeout: 15000 });
       if (response.data.success) {
         setAutomation(prev => ({
           ...prev,
@@ -227,7 +231,7 @@ export default function FunctionsScreen() {
     }
     setIsLoading(true);
     try {
-      const response = await axios.post(`${robotUrl}/api/automation/voice_light`, { action }, { timeout: 20000 });
+      const response = await axios.post(`${robotUrl}/api/automation/voice_light`, { action, esp32_ip: automation.esp32Ip }, { timeout: 20000 });
       if (response.data.success) {
         setAutomation(prev => ({
           ...prev,
@@ -242,6 +246,57 @@ export default function FunctionsScreen() {
       Alert.alert('Error', 'Failed to control light via voice.');
     } finally {
       setIsLoading(false);
+    }
+  };
+
+  const updateEsp32Ip = async () => {
+    if (!robotUrl) {
+      Alert.alert('Not Connected', 'Please connect to NAO robot first.');
+      return;
+    }
+    if (!esp32IpInput || esp32IpInput.trim() === '') {
+      Alert.alert('Error', 'Please enter a valid IP address');
+      return;
+    }
+    setIsLoading(true);
+    try {
+      const response = await axios.post(`${robotUrl}/api/automation/set_ip`, { esp32_ip: esp32IpInput }, { timeout: 10000 });
+      if (response.data.success) {
+        setAutomation(prev => ({ ...prev, esp32Ip: esp32IpInput, esp32Connected: response.data.connected }));
+        Alert.alert('Success', `ESP32 IP updated to ${esp32IpInput}`);
+      } else {
+        Alert.alert('Error', response.data.message || 'Failed to update IP');
+      }
+    } catch (error) {
+      Alert.alert('Error', 'Failed to update ESP32 IP');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const startVoiceListening = async () => {
+    if (!robotUrl) {
+      Alert.alert('Not Connected', 'Please connect to NAO robot first.');
+      return;
+    }
+    setAutomation(prev => ({ ...prev, isListening: true }));
+    try {
+      const response = await axios.post(`${robotUrl}/api/automation/listen_command`, { esp32_ip: automation.esp32Ip }, { timeout: 30000 });
+      if (response.data.success) {
+        setAutomation(prev => ({
+          ...prev,
+          lightStatus: response.data.light_status,
+          esp32Connected: true,
+          lastAction: `Voice: "${response.data.command}" - ${response.data.action} at ${new Date().toLocaleTimeString()}`,
+          isListening: false,
+        }));
+      } else {
+        Alert.alert('Info', response.data.message || 'No command detected');
+        setAutomation(prev => ({ ...prev, isListening: false }));
+      }
+    } catch (error) {
+      Alert.alert('Error', 'Voice listening failed');
+      setAutomation(prev => ({ ...prev, isListening: false }));
     }
   };
 
@@ -614,6 +669,25 @@ export default function FunctionsScreen() {
                 Control your room light using NAO robot. NAO will speak and then turn the light on or off via ESP32.
               </Text>
 
+              <Text style={styles.sectionTitle}>ESP32 IP Address</Text>
+              <View style={styles.ipInputRow}>
+                <TextInput
+                  style={styles.ipInput}
+                  value={esp32IpInput}
+                  onChangeText={setEsp32IpInput}
+                  placeholder="Enter ESP32 IP"
+                  placeholderTextColor={COLORS.textMuted}
+                  keyboardType="numeric"
+                />
+                <TouchableOpacity 
+                  style={[styles.ipSaveButton, !isConnected && styles.buttonDisabled]} 
+                  onPress={updateEsp32Ip} 
+                  disabled={!isConnected || isLoading}
+                >
+                  <Text style={styles.ipSaveText}>Save</Text>
+                </TouchableOpacity>
+              </View>
+
               <View style={[styles.lightStatusDisplay, { backgroundColor: automation.lightStatus ? COLORS.warning + '20' : COLORS.surfaceLight }]}>
                 <Ionicons 
                   name={automation.lightStatus ? 'bulb' : 'bulb-outline'} 
@@ -627,6 +701,28 @@ export default function FunctionsScreen() {
                   <Text style={styles.lastActionText}>{automation.lastAction}</Text>
                 ) : null}
               </View>
+
+              <Text style={styles.sectionTitle}>Voice Listen (Say command to NAO)</Text>
+              <Text style={styles.voiceDescription}>
+                Tap the button below, then say "turn on the light" or "turn off the light" to NAO
+              </Text>
+              <TouchableOpacity 
+                style={[styles.listenButton, automation.isListening && styles.listeningActive, !isConnected && styles.buttonDisabled]} 
+                onPress={startVoiceListening} 
+                disabled={!isConnected || automation.isListening}
+              >
+                {automation.isListening ? (
+                  <>
+                    <ActivityIndicator color={COLORS.text} />
+                    <Text style={styles.listenButtonText}>Listening... Say your command</Text>
+                  </>
+                ) : (
+                  <>
+                    <Ionicons name="ear" size={28} color={COLORS.text} />
+                    <Text style={styles.listenButtonText}>Tap to Listen for Voice Command</Text>
+                  </>
+                )}
+              </TouchableOpacity>
 
               <Text style={styles.sectionTitle}>Manual Control</Text>
               <View style={styles.lightButtonsRow}>
@@ -840,6 +936,15 @@ const styles = StyleSheet.create({
   voiceOnButton: { flex: 1, backgroundColor: COLORS.success, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', padding: SPACING.md, borderRadius: BORDER_RADIUS.md, gap: SPACING.xs },
   voiceOffButton: { flex: 1, backgroundColor: COLORS.primary, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', padding: SPACING.md, borderRadius: BORDER_RADIUS.md, gap: SPACING.xs },
   voiceButtonText: { color: COLORS.text, fontSize: FONT_SIZES.sm, fontWeight: '600' },
+  // IP Input styles
+  ipInputRow: { flexDirection: 'row', gap: SPACING.sm, marginBottom: SPACING.lg },
+  ipInput: { flex: 1, backgroundColor: COLORS.surfaceLight, borderRadius: BORDER_RADIUS.md, padding: SPACING.md, color: COLORS.text, fontSize: FONT_SIZES.md, borderWidth: 1, borderColor: COLORS.border },
+  ipSaveButton: { backgroundColor: COLORS.primary, borderRadius: BORDER_RADIUS.md, paddingHorizontal: SPACING.lg, justifyContent: 'center' },
+  ipSaveText: { color: COLORS.text, fontSize: FONT_SIZES.md, fontWeight: '600' },
+  // Listen button styles
+  listenButton: { backgroundColor: COLORS.secondary, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', padding: SPACING.lg, borderRadius: BORDER_RADIUS.lg, gap: SPACING.md, marginBottom: SPACING.lg },
+  listeningActive: { backgroundColor: COLORS.error },
+  listenButtonText: { color: COLORS.text, fontSize: FONT_SIZES.md, fontWeight: '600' },
   // Storytelling styles
   storiesGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: SPACING.md },
   storyCard: { width: '47%', backgroundColor: COLORS.surfaceLight, borderRadius: BORDER_RADIUS.lg, padding: SPACING.lg, alignItems: 'center', borderWidth: 1, borderColor: COLORS.border },
