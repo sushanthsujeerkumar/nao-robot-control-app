@@ -36,10 +36,25 @@ export default function FunctionsScreen() {
     esp32Connected: false,
     lastAction: '',
   });
+
+  const [storytelling, setStorytelling] = useState({
+    status: 'idle',
+    message: 'Select a story to play',
+    currentStory: '',
+    isPlaying: false,
+  });
   
   const [isLoading, setIsLoading] = useState(false);
   const [activeTab, setActiveTab] = useState('fall');
   const pollingRef = useRef(null);
+
+  const stories = [
+    { id: 1, name: 'The Bear and the Bee', icon: '🐻', duration: '3 min' },
+    { id: 2, name: 'The Lion and the Mouse', icon: '🦁', duration: '2 min' },
+    { id: 3, name: 'The Tortoise and the Hare', icon: '🐢', duration: '3 min' },
+    { id: 4, name: 'The Fox and the Grapes', icon: '🦊', duration: '2 min' },
+    { id: 5, name: 'The Ant and the Grasshopper', icon: '🐜', duration: '3 min' },
+  ];
 
   const isConnected = status?.connected && robotUrl;
 
@@ -250,6 +265,78 @@ export default function FunctionsScreen() {
     }
   }, [activeTab, robotUrl]);
 
+  // Storytelling Functions
+  const playStory = async (storyId, storyName) => {
+    if (!robotUrl) {
+      Alert.alert('Not Connected', 'Please connect to NAO robot first.');
+      return;
+    }
+    setIsLoading(true);
+    setStorytelling(prev => ({
+      ...prev,
+      status: 'loading',
+      message: `Loading "${storyName}"...`,
+      currentStory: storyName,
+    }));
+    try {
+      const response = await axios.post(`${robotUrl}/api/storytelling/play`, { story_id: storyId }, { timeout: 120000 });
+      if (response.data.success) {
+        setStorytelling(prev => ({
+          ...prev,
+          status: 'playing',
+          message: `Now playing: ${storyName}`,
+          isPlaying: true,
+        }));
+        // Poll for status
+        pollStoryStatus();
+      } else {
+        Alert.alert('Error', response.data.message || 'Failed to play story');
+        setStorytelling(prev => ({ ...prev, status: 'idle', message: 'Select a story to play', isPlaying: false }));
+      }
+    } catch (error) {
+      Alert.alert('Error', 'Failed to play story');
+      setStorytelling(prev => ({ ...prev, status: 'idle', message: 'Select a story to play', isPlaying: false }));
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const stopStory = async () => {
+    if (!robotUrl) return;
+    setIsLoading(true);
+    try {
+      await axios.post(`${robotUrl}/api/storytelling/stop`, {}, { timeout: 10000 });
+      setStorytelling({
+        status: 'idle',
+        message: 'Story stopped',
+        currentStory: '',
+        isPlaying: false,
+      });
+    } catch (error) {
+      Alert.alert('Error', 'Failed to stop story');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const pollStoryStatus = async () => {
+    if (!robotUrl) return;
+    try {
+      const response = await axios.get(`${robotUrl}/api/storytelling/status`, { timeout: 5000 });
+      setStorytelling(prev => ({
+        ...prev,
+        status: response.data.status || 'idle',
+        message: response.data.message || 'Select a story to play',
+        isPlaying: response.data.is_playing || false,
+      }));
+      if (response.data.is_playing) {
+        setTimeout(pollStoryStatus, 3000);
+      }
+    } catch (error) {
+      // Ignore polling errors
+    }
+  };
+
   const getExerciseStatusColor = () => {
     switch (exercise.status) {
       case 'squat':
@@ -304,22 +391,29 @@ export default function FunctionsScreen() {
             style={[styles.tab, activeTab === 'fall' && styles.tabActive]}
             onPress={() => setActiveTab('fall')}
           >
-            <Ionicons name="body" size={20} color={activeTab === 'fall' ? COLORS.text : COLORS.textMuted} />
+            <Ionicons name="body" size={18} color={activeTab === 'fall' ? COLORS.text : COLORS.textMuted} />
             <Text style={[styles.tabText, activeTab === 'fall' && styles.tabTextActive]}>Fall</Text>
           </TouchableOpacity>
           <TouchableOpacity
             style={[styles.tab, activeTab === 'exercise' && styles.tabActive]}
             onPress={() => setActiveTab('exercise')}
           >
-            <Ionicons name="fitness" size={20} color={activeTab === 'exercise' ? COLORS.text : COLORS.textMuted} />
+            <Ionicons name="fitness" size={18} color={activeTab === 'exercise' ? COLORS.text : COLORS.textMuted} />
             <Text style={[styles.tabText, activeTab === 'exercise' && styles.tabTextActive]}>Exercise</Text>
           </TouchableOpacity>
           <TouchableOpacity
             style={[styles.tab, activeTab === 'automation' && styles.tabActive]}
             onPress={() => setActiveTab('automation')}
           >
-            <Ionicons name="bulb" size={20} color={activeTab === 'automation' ? COLORS.text : COLORS.textMuted} />
-            <Text style={[styles.tabText, activeTab === 'automation' && styles.tabTextActive]}>Automation</Text>
+            <Ionicons name="bulb" size={18} color={activeTab === 'automation' ? COLORS.text : COLORS.textMuted} />
+            <Text style={[styles.tabText, activeTab === 'automation' && styles.tabTextActive]}>Light</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.tab, activeTab === 'story' && styles.tabActive]}
+            onPress={() => setActiveTab('story')}
+          >
+            <Ionicons name="book" size={18} color={activeTab === 'story' ? COLORS.text : COLORS.textMuted} />
+            <Text style={[styles.tabText, activeTab === 'story' && styles.tabTextActive]}>Story</Text>
           </TouchableOpacity>
         </View>
 
@@ -600,9 +694,80 @@ export default function FunctionsScreen() {
                 <Text style={styles.infoTitle}>ESP32 Setup</Text>
               </View>
               <Text style={styles.infoText}>
-                ESP32 IP: 172.18.16.50{'\n'}
+                ESP32 IP: 172.18.16.59{'\n'}
                 LED Pin: GPIO 4{'\n'}
                 WiFi: ll_cst_labs
+              </Text>
+            </Card>
+          </>
+        )}
+
+        {activeTab === 'story' && (
+          <>
+            <Card style={styles.card}>
+              <View style={styles.cardHeader}>
+                <View style={styles.cardTitleRow}>
+                  <Ionicons name="book" size={24} color={COLORS.primary} />
+                  <Text style={styles.cardTitle}>Storytelling</Text>
+                </View>
+                <View style={[styles.statusBadge, { backgroundColor: storytelling.isPlaying ? COLORS.success + '30' : COLORS.textMuted + '30' }]}>
+                  <View style={[styles.statusDot, { backgroundColor: storytelling.isPlaying ? COLORS.success : COLORS.textMuted }]} />
+                  <Text style={[styles.statusText, { color: storytelling.isPlaying ? COLORS.success : COLORS.textMuted }]}>
+                    {storytelling.isPlaying ? 'Playing' : 'Ready'}
+                  </Text>
+                </View>
+              </View>
+
+              <Text style={styles.description}>
+                NAO will tell you a story with voice and gestures. Select a story below to begin.
+              </Text>
+
+              {storytelling.isPlaying && (
+                <View style={[styles.statusDisplay, { borderColor: COLORS.success }]}>
+                  <Ionicons name="volume-high" size={50} color={COLORS.success} />
+                  <Text style={styles.statusMessage}>{storytelling.message}</Text>
+                  <Text style={styles.currentExercise}>{storytelling.currentStory}</Text>
+                </View>
+              )}
+
+              {storytelling.isPlaying ? (
+                <TouchableOpacity 
+                  style={[styles.stopButton, !isConnected && styles.buttonDisabled]} 
+                  onPress={stopStory} 
+                  disabled={!isConnected || isLoading}
+                >
+                  {isLoading ? <ActivityIndicator color={COLORS.text} /> : (
+                    <>
+                      <Ionicons name="stop-circle" size={24} color={COLORS.text} />
+                      <Text style={styles.buttonText}>Stop Story</Text>
+                    </>
+                  )}
+                </TouchableOpacity>
+              ) : (
+                <View style={styles.storiesGrid}>
+                  {stories.map((story) => (
+                    <TouchableOpacity
+                      key={story.id}
+                      style={[styles.storyCard, !isConnected && styles.buttonDisabled]}
+                      onPress={() => playStory(story.id, story.name)}
+                      disabled={!isConnected || isLoading}
+                    >
+                      <Text style={styles.storyIcon}>{story.icon}</Text>
+                      <Text style={styles.storyName}>{story.name}</Text>
+                      <Text style={styles.storyDuration}>{story.duration}</Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+              )}
+            </Card>
+
+            <Card style={styles.infoCard}>
+              <View style={styles.infoHeader}>
+                <Ionicons name="information-circle" size={20} color={COLORS.textSecondary} />
+                <Text style={styles.infoTitle}>How It Works</Text>
+              </View>
+              <Text style={styles.infoText}>
+                NAO will narrate the story using text-to-speech and perform gestures to bring the story to life. Make sure your story audio files are in the stories folder on your laptop.
               </Text>
             </Card>
           </>
@@ -675,4 +840,10 @@ const styles = StyleSheet.create({
   voiceOnButton: { flex: 1, backgroundColor: COLORS.success, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', padding: SPACING.md, borderRadius: BORDER_RADIUS.md, gap: SPACING.xs },
   voiceOffButton: { flex: 1, backgroundColor: COLORS.primary, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', padding: SPACING.md, borderRadius: BORDER_RADIUS.md, gap: SPACING.xs },
   voiceButtonText: { color: COLORS.text, fontSize: FONT_SIZES.sm, fontWeight: '600' },
+  // Storytelling styles
+  storiesGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: SPACING.md },
+  storyCard: { width: '47%', backgroundColor: COLORS.surfaceLight, borderRadius: BORDER_RADIUS.lg, padding: SPACING.lg, alignItems: 'center', borderWidth: 1, borderColor: COLORS.border },
+  storyIcon: { fontSize: 40, marginBottom: SPACING.sm },
+  storyName: { color: COLORS.text, fontSize: FONT_SIZES.sm, fontWeight: '600', textAlign: 'center', marginBottom: SPACING.xs },
+  storyDuration: { color: COLORS.textMuted, fontSize: FONT_SIZES.xs },
 });
